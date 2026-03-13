@@ -608,11 +608,82 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
         check_is_fitted(self, "selector_")
         return self.selector_.transform(X)
 
+    def get_support(self, indices=False):
+        check_is_fitted(self, "selector_")
+        return self.selector_.get_support(indices=indices)
+
 
 def balanced_sample_weights(y):
     classes, counts = np.unique(y, return_counts=True)
     w = {c: len(y) / (len(classes) * n) for c, n in zip(classes, counts)}
     return np.array([w[yi] for yi in y])
+
+
+def make_cl_transformer():
+    return ContrastiveMITransformer(
+        embedding_dim=128,
+        hidden_dim=512,
+        n_epochs=15,
+        lr=1e-4,
+        weight_decay=1e-4,
+        batch_size=128,
+        margin=0.5,
+        n_triplets=4000,
+        negative_class="partial",   # hard negatives
+        concat_original=True,
+        scale_for_cl=True,
+        random_state=42,
+        verbose=False,
+    )
+
+
+# -----------------------------
+# Shared feature pipeline
+# Order:
+# impute -> vt -> [cl] -> mi -> smote -> ordinal model
+# -----------------------------
+def make_feature_steps(with_cl=False):
+    steps = [
+        ("impute", SimpleImputer(strategy="median")),
+        ("vt", VarianceThreshold(threshold=0.0)),
+    ]
+
+    if with_cl:
+        steps.append((
+            "cl",
+            ContrastiveMITransformer(
+                embedding_dim=128,
+                hidden_dim=512,
+                epochs=15,
+                lr=1e-4,
+                weight_decay=1e-4,
+                batch_size=128,
+                margin=0.5,
+                n_triplets=4000,
+                negative_class="partial",   # hard negatives
+                concat_original=True,
+                scale_for_cl=True,
+                random_state=42,
+                verbose=False,
+            )
+        ))
+
+    steps.append((
+        "mi",
+        SafeMISelectKBest(
+            k=5500,
+            with_cl=with_cl,
+            embedding_dim=128,
+            random_state=42,
+        )
+    ))
+
+    steps.append((
+        "smote",
+        SMOTE(sampling_strategy={1: 180, 2: 250}, k_neighbors=5, random_state=42)
+    ))
+
+    return steps
 
 
 # ─────────────────────────────────────────────────────────────

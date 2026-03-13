@@ -7,6 +7,7 @@ All plot logic copied EXACTLY from the source notebook.
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 import shap
 from sklearn.base import clone
 from sklearn.model_selection import (cross_val_predict, learning_curve)
@@ -540,3 +541,295 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
 
     pivot_df.reset_index().to_csv("shap_xgb_pipeline_comparison.csv", index=False)
     print("Saved: shap_xgb_pipeline_comparison.csv")
+
+
+# -----------------------------------------------------------------------------
+# SECTION B  --  Propagate names through pipeline VT + [CL] + MI
+# -----------------------------------------------------------------------------
+
+def transform_with_names(fitted_pipe, X_in, names_in, groups_in, label=""):
+    # Run X through impute -> vt -> [cl] -> mi, tracking which features survive
+    # each selection step.  Stops before 'smote' and the final ordinal model.
+    # Returns (X_model, feat_names_arr, feat_groups_arr).
+    Xt    = X_in.copy()
+    names = np.array(names_in,  dtype=object)
+    grps  = np.array(groups_in, dtype=object)
+
+    for step_name, step in fitted_pipe.steps:
+        if step_name in ("smote", "ordinal_xgb", "ordinal_rf"):
+            break
+
+        if step_name == "impute":
+            Xt = step.transform(Xt)
+            # SimpleImputer keeps all columns; names unchanged
+
+        elif step_name == "vt":
+            Xt    = step.transform(Xt)
+            mask  = step.get_support()
+            names = names[mask]
+            grps  = grps[mask]
+
+        elif step_name == "cl":
+            Xt    = step.transform(Xt)
+            n_out = Xt.shape[1]
+            emb   = getattr(step, "embedding_dim", n_out)
+            # If concat_original=True the output is [CL_emb | original_features]
+            cl_n  = [f"cl_emb_{i:03d}" for i in range(min(emb, n_out))]
+            cl_g  = ["CL Embedding"] * len(cl_n)
+            if n_out > emb:
+                n_orig = n_out - emb
+                orig_n = (list(names[:n_orig]) if len(names) >= n_orig
+                          else [f"orig_{i}" for i in range(n_orig)])
+                orig_g = (list(grps[:n_orig])  if len(grps)  >= n_orig
+                          else ["CL Original"] * n_orig)
+                names = np.array(cl_n + orig_n, dtype=object)
+                grps  = np.array(cl_g + orig_g, dtype=object)
+            else:
+                names = np.array(cl_n, dtype=object)
+                grps  = np.array(cl_g, dtype=object)
+
+        elif step_name == "mi":
+            Xt    = step.transform(Xt)
+            mask  = step.get_support()
+            names = names[mask]
+            grps  = grps[mask]
+
+        else:
+            try:
+                Xt_new = step.transform(Xt)
+                if Xt_new.shape[1] == Xt.shape[1]:
+                    Xt = Xt_new
+                else:
+                    print(f"  [warn] '{step_name}' changed shape "
+                          f"{Xt.shape[1]}->{Xt_new.shape[1]}; names reset.")
+                    Xt    = Xt_new
+                    names = np.array([f"{step_name}_{i}"
+                                      for i in range(Xt.shape[1])], dtype=object)
+                    grps  = np.array(["Unknown"] * Xt.shape[1], dtype=object)
+            except Exception as err:
+                print(f"  [warn] Could not transform '{step_name}': {err}")
+
+    if label:
+        print(f"  [{label}] features entering XGB: {Xt.shape[1]} "
+              f" (names tracked: {len(names)})")
+    return Xt, names, grps
+
+
+# -----------------------------------------------------------------------------
+# SECTION C  --  Colour palette (one colour per feature category)
+# -----------------------------------------------------------------------------
+
+_GRP_PAL = {
+    "Process Variables":          "#e63946",
+    "Process Interactions":       "#f4722b",
+    "Metal Center (mendeleev)":   "#2a9d8f",
+    "Metal Precursor Complex":    "#48cae4",
+    "Linker ChemBERT":            "#6a4c93",
+    "Mod ChemBERT":               "#9b5de5",
+    "Linker Physchem/FP":         "#b5a0d8",
+    "Mod Physchem/FP":            "#c8b6e2",
+    "Linker Morgan FP":           "#457b9d",
+    "Modulator Morgan FP":        "#1d3557",
+    "Modulator Equiv.":           "#4e9af1",
+    "Precursor Ligand FP":        "#235789",
+    "Precursor Ligand RAC":       "#52b788",
+    "Modulator RAC":              "#74c69d",
+    "Ligand TEP (Electronic)":    "#f4a261",
+    "Ligand Sterics":             "#e76f51",
+    "Reaction FP (DRFP)":         "#264653",
+    "3D SOAP Descriptor":         "#2b9348",
+    "3D SOAP (Precursor)":        "#2b9348",
+    "3D SOAP (Linker)":           "#55a630",
+    "G14 Hub Topology":           "#e9c46a",
+    "G14 Hub SMARTS":             "#f4d58d",
+    "Linker TTP":                 "#f9c74f",
+    "Linker EState":              "#90e0ef",
+    "Linker Topological":         "#00b4d8",
+    "Linker Torsion FP":          "#0077b6",
+    "Linker Atom-Pair FP":        "#023e8a",
+    "Halide Features":            "#d4a5a5",
+    "Inventory Numeric":          "#a8dadc",
+    "Process Variables (raw)":    "#f1faee",
+    "KMeans Cluster OHE":         "#adb5bd",
+    "CL Embedding":               "#ff006e",
+    "Other Structural":           "#888888",
+    "Unknown":                    "#cccccc",
+}
+
+def _pal(group):
+    return _GRP_PAL.get(group, "#888888")
+
+
+# -----------------------------------------------------------------------------
+# SECTION D  --  Main SHAP analysis + three-plot output per pipeline
+# -----------------------------------------------------------------------------
+
+def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
+    print(f"\n{'='*70}")
+    print(f"  SHAP  >>  {pipe_label}")
+    print(f"{'='*70}")
+
+    fitted = clone(pipe)
+    fitted.fit(X, y)
+
+    X_model, feat_names, feat_grps = transform_with_names(
+        fitted, X, X_names, X_groups, label=pipe_label)
+
+    ordinal_step = fitted.named_steps["ordinal_xgb"]
+    classifiers  = ordinal_step.classifiers_
+
+    thresh_abs = {}
+    shap_stack = []
+    for thresh, xgb_model in classifiers.items():
+        explainer = shap.TreeExplainer(xgb_model)
+        sv = np.asarray(explainer.shap_values(X_model))
+        if sv.ndim == 3:
+            sv = sv[..., -1]
+        thresh_abs[thresh] = np.abs(sv).mean(axis=0)
+        shap_stack.append(sv)
+
+    mean_abs_shap = np.stack(list(thresh_abs.values())).mean(axis=0)
+    shap_avg      = np.mean(shap_stack, axis=0)
+
+    df_imp = pd.DataFrame({
+        "feature":       feat_names,
+        "group":         feat_grps,
+        "mean_abs_shap": mean_abs_shap,
+    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+    df_imp.to_csv(f"shap_named_{pipe_label}.csv", index=False)
+    print(f"  Saved: shap_named_{pipe_label}.csv")
+
+    # ── Plot 1 -- Feature-group bar chart (SUM) ───────────────────────────
+    # Total group importance -- larger groups will naturally score higher.
+    # Useful for understanding raw predictive weight of each block.
+    df_grp     = (df_imp.groupby("group")["mean_abs_shap"]
+                        .sum()
+                        .sort_values(ascending=True))
+    df_grp_cnt = df_imp.groupby("group")["mean_abs_shap"].count()
+
+    fig1, ax1 = plt.subplots(figsize=(11, max(5, 0.42 * len(df_grp))))
+    cols1 = [_pal(g) for g in df_grp.index]
+    bars1 = ax1.barh(df_grp.index, df_grp.values,
+                     color=cols1, edgecolor="white", linewidth=0.6)
+    xmax = df_grp.max()
+    for bar, val, grp in zip(bars1, df_grp.values, df_grp.index):
+        n_feat = df_grp_cnt[grp]
+        ax1.text(val + xmax * 0.01, bar.get_y() + bar.get_height() / 2,
+                 f"{val:.4f}  (n={n_feat})", va="center", ha="left", fontsize=7.5)
+    ax1.set_xlabel(
+        "Sum of Mean |SHAP value|  (summed across Frank-Hall thresholds)",
+        fontsize=11)
+    ax1.set_title(
+        f"{pipe_label}\nSHAP Feature-Category Importance (total)  --  LVMOF Crystallinity",
+        fontsize=12, fontweight="bold")
+    ax1.spines[["top","right"]].set_visible(False)
+    plt.tight_layout()
+    fig1.savefig(f"shap_group_{pipe_label}.png", dpi=180, bbox_inches="tight")
+    plt.show()
+    print(f"  Saved: shap_group_{pipe_label}.png")
+
+    df_grp.sort_values(ascending=False).reset_index().rename(
+        columns={"mean_abs_shap": "sum_mean_abs_shap"}).assign(
+        n_features=lambda d: d["group"].map(df_grp_cnt)).to_csv(
+        f"shap_group_{pipe_label}.csv", index=False)
+    print(f"  Saved: shap_group_{pipe_label}.csv")
+
+    # ── Plot 1b -- Feature-group bar chart (MEAN, size-normalised) ────────
+    # Divides each group's total SHAP by the number of features in that group.
+    # Answers: "which feature TYPE carries the most signal per individual
+    # variable?" -- corrects for large blocks (SOAP, fingerprints) inflating
+    # their apparent importance purely through feature count.
+    df_grp_avg = (df_imp.groupby("group")["mean_abs_shap"]
+                        .mean()
+                        .sort_values(ascending=True))
+
+    fig1b, ax1b = plt.subplots(figsize=(11, max(5, 0.42 * len(df_grp_avg))))
+    cols1b = [_pal(g) for g in df_grp_avg.index]
+    bars1b = ax1b.barh(df_grp_avg.index, df_grp_avg.values,
+                       color=cols1b, edgecolor="white", linewidth=0.6)
+    xmax1b = df_grp_avg.max()
+    for bar, val, grp in zip(bars1b, df_grp_avg.values, df_grp_avg.index):
+        n_feat = df_grp_cnt[grp]
+        ax1b.text(val + xmax1b * 0.01, bar.get_y() + bar.get_height() / 2,
+                  f"{val:.5f}  (n={n_feat})", va="center", ha="left", fontsize=7.5)
+    ax1b.set_xlabel(
+        "Mean |SHAP value| per feature  (averaged across Frank-Hall thresholds)",
+        fontsize=11)
+    ax1b.set_title(
+        f"{pipe_label}\nSHAP Feature-Category Importance (size-normalised)"
+        "  --  LVMOF Crystallinity",
+        fontsize=12, fontweight="bold")
+    ax1b.spines[["top","right"]].set_visible(False)
+    plt.tight_layout()
+    fig1b.savefig(f"shap_group_avg_{pipe_label}.png", dpi=180, bbox_inches="tight")
+    plt.show()
+    print(f"  Saved: shap_group_avg_{pipe_label}.png")
+
+    df_grp_avg.sort_values(ascending=False).reset_index().rename(
+        columns={"mean_abs_shap": "mean_per_feature_shap"}).assign(
+        n_features=lambda d: d["group"].map(df_grp_cnt)).to_csv(
+        f"shap_group_avg_{pipe_label}.csv", index=False)
+    print(f"  Saved: shap_group_avg_{pipe_label}.csv")
+
+    # ── Plot 2 -- Top-N individual features (bar, colour = category) ──────
+    top_df  = df_imp.head(top_n).iloc[::-1]
+    cols2   = [_pal(g) for g in top_df["group"]]
+
+    fig2, ax2 = plt.subplots(figsize=(11, max(6, 0.38 * top_n)))
+    ax2.barh(top_df["feature"], top_df["mean_abs_shap"],
+             color=cols2, edgecolor="white", linewidth=0.4)
+    legend_h = [Patch(facecolor=_pal(g), label=g)
+                for g in pd.unique(top_df["group"])]
+    ax2.legend(handles=legend_h, loc="lower right", fontsize=7.5,
+               framealpha=0.8, title="Feature Category", title_fontsize=8)
+    ax2.set_xlabel("Mean |SHAP value|", fontsize=11)
+    ax2.set_title(
+        f"{pipe_label}  --  Top {top_n} Individual Features\n"
+        "(colour = feature category)",
+        fontsize=12, fontweight="bold")
+    ax2.spines[["top","right"]].set_visible(False)
+    plt.tight_layout()
+    fig2.savefig(f"shap_top{top_n}_{pipe_label}.png", dpi=180, bbox_inches="tight")
+    plt.show()
+    print(f"  Saved: shap_top{top_n}_{pipe_label}.png")
+
+    # ── Plot 3 -- SHAP beeswarm (signed, top-N, avg over thresholds) ──────
+    top_feat_set = set(df_imp["feature"].iloc[:top_n])
+    top_cols     = [i for i, nm in enumerate(feat_names)
+                    if nm in top_feat_set][:top_n]
+    top_feat_ord = [feat_names[i] for i in top_cols]
+
+    try:
+        shap.summary_plot(
+            shap_avg[:, top_cols],
+            X_model[:, top_cols],
+            feature_names=top_feat_ord,
+            max_display=top_n,
+            show=False,
+            plot_type="dot",
+            color_bar_label="Feature value (normalised)",
+        )
+        plt.title(
+            f"{pipe_label}  --  SHAP Beeswarm  (avg over ordinal thresholds)\n"
+            f"Top {top_n} features  |  "
+            "positive SHAP => pushes toward Crystalline",
+            fontsize=9, fontweight="bold")
+        plt.tight_layout()
+        plt.savefig(f"shap_beeswarm_{pipe_label}.png",
+                    dpi=180, bbox_inches="tight")
+        plt.show()
+        print(f"  Saved: shap_beeswarm_{pipe_label}.png")
+    except Exception as _e:
+        plt.close("all")
+        print(f"  Beeswarm skipped: {_e}")
+
+    # Console summary
+    print(f"\n  Top 15 features -- {pipe_label}")
+    print(f"  {'Feature':<45} {'Category':<30} {'Mean|SHAP|':>10}")
+    print(f"  {'-'*88}")
+    for _, row in df_imp.head(15).iterrows():
+        print(f"  {str(row['feature']):<45} {str(row['group']):<30} "
+              f"{row['mean_abs_shap']:>10.5f}")
+
+    return df_imp

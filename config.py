@@ -122,62 +122,39 @@ ION_MAP = {
 
 # ── Metal center block dimensions (cell 16) ───────────────────────────────────
 _COLIGAND_LOOKUP = {
-    'PPh3':  ('phosphine', 'aromatic', 3, False),
-    'PCy3':  ('phosphine', 'aliphatic', 3, False),
-    'PMe3':  ('phosphine', 'aliphatic', 3, False),
-    'PEt3':  ('phosphine', 'aliphatic', 3, False),
-    'dppe':  ('phosphine', 'bidentate', 2, True),
-    'dppp':  ('phosphine', 'bidentate', 3, True),
-    'dppb':  ('phosphine', 'bidentate', 4, True),
-    'BINAP': ('phosphine', 'bidentate_chiral', 2, True),
-    'py':    ('nitrogen',  'aromatic', 1, False),
-    'bipy':  ('nitrogen',  'bidentate', 2, True),
-    'phen':  ('nitrogen',  'bidentate_rigid', 2, True),
-    'CO':    ('carbonyl',  'pi_acid', 1, False),
-    'Cl':    ('halide',    'anionic', 1, False),
-    'Br':    ('halide',    'anionic', 1, False),
-    'I':     ('halide',    'anionic', 1, False),
-    'OAc':   ('carboxylate', 'anionic', 2, True),
-    'acac':  ('beta_diketonate', 'bidentate', 2, True),
-    'maleimidato': ('nitrogen_oxygen', 'bidentate', 2, True),
+    # CO: strong π-acceptor, weak trans influence relative to H,
+    #     but highest field strength ligand known
+    'CO':    [0.99,  0.90, 1.00,  0.0,  0.0, 1.0],
+    '[CO]':  [0.99,  0.90, 1.00,  0.0,  0.0, 1.0],
+
+    # Halides: σ-donors, weak π-donors, negative EL
+    # Trans influence order: I > Br > Cl > F (Appleton 1973)
+    '[Cl-]': [-0.24, 0.35, 0.47, -1.0,  1.0, 0.0],
+    'Cl':    [-0.24, 0.35, 0.47, -1.0,  1.0, 0.0],
+    '[Br-]': [-0.22, 0.45, 0.44, -1.0,  1.0, 0.0],
+    'Br':    [-0.22, 0.45, 0.44, -1.0,  1.0, 0.0],
+    '[I-]':  [-0.24, 0.55, 0.40, -1.0,  1.0, 0.0],
+    'I':     [-0.24, 0.55, 0.40, -1.0,  1.0, 0.0],
+    '[F-]':  [-0.40, 0.15, 0.52, -1.0,  1.0, 0.0],
+    'F':     [-0.40, 0.15, 0.52, -1.0,  1.0, 0.0],
 }
 
+# Feature names matching the 6-vector above — use these in SHAP
 _COLIGAND_FEATURE_NAMES = [
-    'colig_has_phosphine',
-    'colig_has_nitrogen',
-    'colig_has_carbonyl',
-    'colig_has_halide',
-    'colig_has_carboxylate',
-    'colig_has_betadiket',
-    'colig_n_phosphines',
-    'colig_n_nitrogens',
-    'colig_n_carbonyls',
-    'colig_n_halides',
-    'colig_n_bidentate',
-    'colig_frac_bidentate',
-    'colig_has_bidentate',
-    'colig_has_aromatic_p',
-    'colig_has_aliphatic_p',
-    'colig_has_PPh3',
-    'colig_has_PCy3',
-    'colig_has_CO',
-    'colig_has_Cl',
-    'colig_has_Br',
-    'colig_has_bipy',
-    'colig_has_phen',
-    'colig_n_sterically_demanding',
-    'colig_denticity_sum',
-    'colig_total_ligands',
-    'colig_frac_pi_acid',
-    'colig_has_chiral_p',
-    'colig_missing',
+    'EL_lever_V',          # Lever electrochemical parameter (Lever 1990)
+    'trans_influence',     # Appleton 1973 normalized scale
+    'field_strength_norm', # Spectrochemical series, CO=1.0
+    'formal_charge',       # IUPAC, unambiguous
+    'is_halide',           # binary
+    'is_carbonyl',         # binary
 ]
-_COLIGAND_DIM = len(_COLIGAND_FEATURE_NAMES)  # 28
+_COLIGAND_DIM = 6
 
 _METAL_OX_STATE_FALLBACK = {
-    'Pd': 2.0, 'Pt': 2.0, 'Rh': 1.0, 'Ir': 1.0,
-    'Cu': 1.0, 'Au': 1.0, 'Ag': 1.0, 'Co': 2.0,
-    'Ni': 2.0, 'Fe': 2.0, 'Ru': 2.0, 'Os': 2.0,
+    'Pd': 0, 'Pt': 0,           # M(0) phosphine complexes
+    'Rh': 1, 'Ir': 1,           # M(I) carbonyl/phosphine complexes
+    'Ag': 1, 'Au': 1, 'Cu': 1,  # M(I) halide complexes
+    'Co': 2, 'Ni': 2,
 }
 
 METAL_BLOCK_DIM   = 32
