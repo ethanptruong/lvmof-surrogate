@@ -1,0 +1,188 @@
+"""
+pipeline.py
+Optuna objective functions, progress callbacks, and eval_pipe.
+
+objective_xgb and objective_rf take X, y, cv, groups as explicit arguments
+(refactored away from the notebook's closure-based approach).
+"""
+
+import numpy as np
+from sklearn.model_selection import cross_validate, cross_val_score
+
+from models import (scoring_ordinal, make_xgb_pipe, make_rf_pipe,
+                    make_xgb_pipe_cl_only, make_rf_pipe_cl_only)
+
+
+# ─────────────────────────────────────────────────────────────
+# objective_xgb
+# ─────────────────────────────────────────────────────────────
+def objective_xgb(trial, X, y, cv, groups):
+    param = {
+        "n_estimators":     trial.suggest_int("n_estimators", 100, 800),
+        "max_depth":        trial.suggest_int("max_depth", 3, 9),
+        "learning_rate":    trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "gamma":            trial.suggest_float("gamma", 0.0, 2.0),
+        "reg_alpha":        trial.suggest_float("reg_alpha", 1e-5, 5.0, log=True),
+        "reg_lambda":       trial.suggest_float("reg_lambda", 1e-5, 5.0, log=True),
+    }
+    pipe   = make_xgb_pipe(param, with_cl=False)          # same structure as final pipe
+    cv_res = cross_validate(
+        pipe, X, y, cv=cv, groups=groups,
+        scoring=scoring_ordinal, n_jobs=-1, return_train_score=False,
+    )
+    fold_qwk = cv_res["test_qwk"]
+    fold_mae = cv_res["test_mae"]
+    fold_acc = cv_res["test_exact_acc"]
+    mean_qwk = np.mean(fold_qwk)
+
+    try:
+        is_best = mean_qwk > trial.study.best_value
+    except ValueError:
+        is_best = True
+
+    if is_best:
+        print(f"\n  ↳ Trial {trial.number} per-fold:")
+        print(f"    {'Fold':>6} {'QWK':>8} {'MAE':>8} {'ExactAcc':>10} {'Partial_n':>10}")
+        for i, (qwk, mae, acc) in enumerate(zip(fold_qwk, fold_mae, fold_acc)):
+            val_idx   = list(cv.split(X, y, groups))[i][1]
+            n_partial = (y[val_idx] == 1).sum()
+            print(f"    {i+1:>6d} {qwk:>8.4f} {mae:>8.4f} {acc:>10.4f} {n_partial:>10d}")
+        print(f"    {'Mean':>6} {mean_qwk:>8.4f} {np.mean(fold_mae):>8.4f} "
+              f"{np.mean(fold_acc):>10.4f}")
+    return mean_qwk
+
+
+# ─────────────────────────────────────────────────────────────
+# objective_rf
+# ─────────────────────────────────────────────────────────────
+def objective_rf(trial, X, y, cv, groups):
+    param = {
+        "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
+        "max_depth":         trial.suggest_int("max_depth", 5, 30),
+        "min_samples_split": trial.suggest_int("min_samples_split", 2, 15),
+        "min_samples_leaf":  trial.suggest_int("min_samples_leaf", 1, 10),
+        "max_features":      trial.suggest_categorical("max_features",
+                                                        ["sqrt", "log2", None]),
+    }
+    pipe   = make_rf_pipe(param, with_cl=False)            # same structure as final pipe
+    scores = cross_val_score(
+        pipe, X, y, cv=cv, groups=groups,
+        scoring=scoring_ordinal["qwk"], n_jobs=-1,
+    )
+    return np.mean(scores)
+
+
+# ─────────────────────────────────────────────────────────────
+# objective_xgb_cl_only
+# ─────────────────────────────────────────────────────────────
+def objective_xgb_cl_only(trial, X, y, cv, groups):
+    param = {
+        "n_estimators":     trial.suggest_int("n_estimators", 100, 800),
+        "max_depth":        trial.suggest_int("max_depth", 3, 9),
+        "learning_rate":    trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        "subsample":        trial.suggest_float("subsample", 0.5, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.4, 1.0),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "gamma":            trial.suggest_float("gamma", 0.0, 2.0),
+        "reg_alpha":        trial.suggest_float("reg_alpha", 1e-5, 5.0, log=True),
+        "reg_lambda":       trial.suggest_float("reg_lambda", 1e-5, 5.0, log=True),
+    }
+
+    pipe = make_xgb_pipe_cl_only(param)  # CL-only feature pipeline
+
+    cv_res = cross_validate(
+        pipe,
+        X, y,
+        cv=cv,
+        groups=groups,
+        scoring=scoring_ordinal,
+        n_jobs=1,                 # CL uses PyTorch -> avoid multiprocessing
+        return_train_score=False,
+    )
+
+    fold_qwk = cv_res["test_qwk"]
+    fold_mae = cv_res["test_mae"]
+    fold_acc = cv_res["test_exact_acc"]
+    mean_qwk = np.mean(fold_qwk)
+
+    try:
+        is_best = mean_qwk > trial.study.best_value
+    except ValueError:
+        is_best = True
+
+    if is_best:
+        print(f"\n  ↳ [CL-only XGB] Trial {trial.number} per-fold:")
+        print(f"    {'Fold':>6} {'QWK':>8} {'MAE':>8} {'ExactAcc':>10} {'Partial_n':>10}")
+        for i, (qwk, mae, acc) in enumerate(zip(fold_qwk, fold_mae, fold_acc)):
+            val_idx   = list(cv.split(X, y, groups))[i][1]
+            n_partial = (y[val_idx] == 1).sum()
+            print(f"    {i+1:>6d} {qwk:>8.4f} {mae:>8.4f} {acc:>10.4f} {n_partial:>10d}")
+        print(f"    {'Mean':>6} {mean_qwk:>8.4f} {np.mean(fold_mae):>8.4f} "
+              f"{np.mean(fold_acc):>10.4f}")
+    return mean_qwk
+
+
+# ─────────────────────────────────────────────────────────────
+# objective_rf_cl_only
+# ─────────────────────────────────────────────────────────────
+def objective_rf_cl_only(trial, X, y, cv, groups):
+    param = {
+        "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
+        "max_depth":         trial.suggest_int("max_depth", 5, 30),
+        "min_samples_split": trial.suggest_int("min_samples_split", 2, 15),
+        "min_samples_leaf":  trial.suggest_int("min_samples_leaf", 1, 10),
+        "max_features":      trial.suggest_categorical(
+            "max_features", ["sqrt", "log2", None]
+        ),
+    }
+
+    pipe = make_rf_pipe_cl_only(param)
+
+    scores = cross_val_score(
+        pipe,
+        X, y,
+        cv=cv,
+        groups=groups,
+        scoring=scoring_ordinal["qwk"],
+        n_jobs=1,   # CL -> keep to 1
+    )
+    return np.mean(scores)
+
+
+# ─────────────────────────────────────────────────────────────
+# progress_callback
+# ─────────────────────────────────────────────────────────────
+def progress_callback(study, trial):
+    marker = " ◄ NEW BEST" if trial.value == study.best_value else ""
+    print(f"  Trial {trial.number:3d} | QWK={trial.value:.4f} "
+          f"| Best={study.best_value:.4f}{marker}")
+
+
+def progress_callback_cl_xgb(study, trial):
+    marker = " ◄ NEW BEST" if trial.value == study.best_value else ""
+    print(f"[CL-only XGB] Trial {trial.number:3d} | QWK={trial.value:.4f} "
+          f"| Best={study.best_value:.4f}{marker}")
+
+
+def progress_callback_cl_rf(study, trial):
+    marker = " ◄ NEW BEST" if trial.value == study.best_value else ""
+    print(f"[CL-only RF] Trial {trial.number:3d} | QWK={trial.value:.4f} "
+          f"| Best={study.best_value:.4f}{marker}")
+
+
+# ─────────────────────────────────────────────────────────────
+# eval_pipe
+# ─────────────────────────────────────────────────────────────
+def eval_pipe(name: str, pipe, X, y, cv, groups, scoring, n_jobs: int = 1):
+    out = cross_validate(
+        pipe, X, y, cv=cv, groups=groups,
+        scoring=scoring, n_jobs=n_jobs,
+    )
+    print(f"\n{name}")
+    print(f"  QWK      {np.mean(out['test_qwk']):.4f}  ±{np.std(out['test_qwk']):.4f}")
+    print(f"  MAE      {-np.mean(out['test_mae']):.4f}  ±{np.std(out['test_mae']):.4f}")
+    print(f"  Within-1 {np.mean(out['test_within1']):.4f}  ±{np.std(out['test_within1']):.4f}")
+    print(f"  Exact    {np.mean(out['test_exact_acc']):.4f}  ±{np.std(out['test_exact_acc']):.4f}")
