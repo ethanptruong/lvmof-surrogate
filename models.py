@@ -247,18 +247,19 @@ class _TripletDataset(Dataset):
         return self.X[a], self.X[p], self.X[n]
 
 
-class _MLPEncoder(nn.Module):
+
+class MLPEncoder(nn.Module):
     def __init__(self, in_dim, hidden_dim=256, embedding_dim=128, dropout=0.2):
         super().__init__()
         h1 = hidden_dim
         h2 = max(hidden_dim // 2, embedding_dim * 2)
         self.net = nn.Sequential(
             nn.Linear(in_dim, h1),
-            nn.BatchNorm1d(h1),
+            nn.LayerNorm(h1),          
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(h1, h2),
-            nn.BatchNorm1d(h2),
+            nn.LayerNorm(h2),          
             nn.ReLU(),
             nn.Dropout(dropout / 2),
             nn.Linear(h2, embedding_dim),
@@ -334,7 +335,7 @@ class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
             torch.cuda.manual_seed_all(self.random_state)
 
     def _build_encoder(self, input_dim):
-        return _MLPEncoder(
+        return MLPEncoder(
             in_dim=input_dim,
             hidden_dim=self.hidden_dim,
             embedding_dim=self.embedding_dim,
@@ -366,8 +367,18 @@ class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
         y_t = torch.tensor(y, dtype=torch.long)
         ds = TensorDataset(X_t, y_t)
 
+        # Seeded generator for reproducibility
+        generator = torch.Generator()
+        generator.manual_seed(self.random_state)
+
         if not self.balanced_batches:
-            return DataLoader(ds, batch_size=self.batch_size, shuffle=True, drop_last=False)
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=True,
+                drop_last=False,
+                generator=generator,   # ← add here too
+            )
 
         classes, counts = np.unique(y, return_counts=True)
         class_w = {c: 1.0 / cnt for c, cnt in zip(classes, counts)}
@@ -376,8 +387,15 @@ class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
             weights=torch.tensor(sample_w, dtype=torch.float32),
             num_samples=len(sample_w),
             replacement=True,
+            generator=generator,      
         )
-        return DataLoader(ds, batch_size=self.batch_size, sampler=sampler, drop_last=False)
+        return DataLoader(
+            ds,
+            batch_size=self.batch_size,
+            sampler=sampler,
+            drop_last=False,
+            generator=generator,       
+        )
 
     def _build_triplets(self, y):
         y = np.asarray(y).astype(int)
@@ -393,9 +411,29 @@ class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
             idx_neg = np.where(y == 0)[0]
         elif self.negative_class in ("rest", "non_crystalline"):
             idx_neg = np.where(y != 2)[0]
+        elif self.negative_class == "mixed":
+            # Half easy (amorphous, class 0) + half hard (partial, class 1)
+            idx_easy = np.where(y == 0)[0]
+            idx_hard = np.where(y == 1)[0]
+            if len(idx_easy) == 0 or len(idx_hard) == 0:
+                raise ValueError("mixed negative_class requires samples from both class 0 and class 1.")
+            rng = np.random.default_rng(self.random_state)
+            triplets = []
+            n_easy = self.n_triplets // 2
+            n_hard = self.n_triplets - n_easy
+            for _ in range(n_easy):
+                a_idx, p_idx = rng.choice(idx_pos, size=2, replace=False)
+                n_idx = rng.choice(idx_easy)
+                triplets.append((int(a_idx), int(p_idx), int(n_idx)))
+            for _ in range(n_hard):
+                a_idx, p_idx = rng.choice(idx_pos, size=2, replace=False)
+                n_idx = rng.choice(idx_hard)
+                triplets.append((int(a_idx), int(p_idx), int(n_idx)))
+            rng.shuffle(triplets)
+            return triplets
         else:
             raise ValueError(
-                "negative_class must be one of: 'partial', 'amorphous', 'rest', 0, 1."
+                "negative_class must be one of: 'partial', 'amorphous', 'rest', 'mixed', 0, 1."
             )
 
         if len(idx_neg) == 0:
@@ -462,11 +500,14 @@ class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
 
         elif self.loss_mode == "triplet":
             self.triplets_ = self._build_triplets(y)
+            _triplet_gen = torch.Generator()
+            _triplet_gen.manual_seed(self.random_state)
             loader = DataLoader(
                 _TripletDataset(X_cl, self.triplets_),
                 batch_size=self.batch_size,
                 shuffle=True,
                 drop_last=False,
+                generator=_triplet_gen,
             )
             loss_fn = nn.TripletMarginLoss(margin=self.margin, p=2)
 
@@ -793,6 +834,49 @@ def _cl_only_steps() -> list:
     ]
 
 
+def _cl_only_steps_triplet() -> list:
+    """
+    Triplet CL-only pipeline:
+        impute -> vt -> cl(triplet, mixed negatives, embedding only) -> smote
+
+    anchor   = crystalline (class 2)
+    positive = crystalline (class 2)
+    negative = 50 % amorphous (easy, class 0) + 50 % partial (hard, class 1)
+    """
+    return [
+        ("impute", SimpleImputer(strategy="median")),
+        ("vt", VarianceThreshold(threshold=0.0)),
+        (
+            "cl",
+            ContrastiveMITransformer(
+                embedding_dim=CL_EMB_DIM,
+                hidden_dim=256,
+                loss_mode="triplet",
+                negative_class="mixed",      # easy (amorphous) + hard (partial)
+                margin=0.5,
+                epochs=15,
+                batch_size=128,
+                lr=1e-3,
+                weight_decay=1e-4,
+                n_triplets=4000,
+                scale_for_cl=True,
+                concat_original=False,       # CL-only: no raw features
+                device=None,
+                random_state=42,
+                verbose=False,
+            ),
+        ),
+        (
+            "smote",
+            SMOTE(
+                sampling_strategy=SMOTE_STRATEGY,
+                k_neighbors=5,
+                random_state=42,
+            ),
+        ),
+    ]
+
+
 # ─────────────────────────────────────────────────────────────
 # Pipeline factories
 # ─────────────────────────────────────────────────────────────
@@ -851,6 +935,40 @@ def make_rf_pipe_cl_only(rf_params):
 def make_xgb_pipe_cl_only(xgb_params):
     return ImbPipeline(
         steps=_cl_only_steps() + [
+            (
+                "ordinal_xgb",
+                FrankHallOrdinalClassifier(
+                    base_estimator=XGBClassifier(
+                        **xgb_params,
+                        **XGB_FIXED,
+                    )
+                ),
+            )
+        ]
+    )
+
+
+def make_rf_pipe_cl_only_triplet(rf_params):
+    return ImbPipeline(
+        steps=_cl_only_steps_triplet() + [
+            (
+                "ordinal_rf",
+                FrankHallOrdinalClassifier(
+                    base_estimator=RandomForestClassifier(
+                        **rf_params,
+                        bootstrap=True,
+                        n_jobs=-1,
+                        random_state=RANDOM_STATE,
+                    )
+                ),
+            )
+        ]
+    )
+
+
+def make_xgb_pipe_cl_only_triplet(xgb_params):
+    return ImbPipeline(
+        steps=_cl_only_steps_triplet() + [
             (
                 "ordinal_xgb",
                 FrankHallOrdinalClassifier(

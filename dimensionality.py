@@ -216,14 +216,14 @@ def select_kmeans_groups(X_2d, y, n_splits=3) -> tuple:
     print(f"{'k':>5} {'Silhouette':>12} {'Min class-2 in val':>20} {'Status':>12}")
 
     best_k, best_score = None, -1
-    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=0)
+    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     for k in range(8, 30, 2):
         km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10)
         labels_k = km.fit_predict(X_2d).astype(int)
         sil = silhouette_score(X_2d, labels_k)
 
-        cv_tmp = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        cv_tmp = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
         worst = 999
         try:
             for _, val_idx in cv_tmp.split(X_2d, y, labels_k):

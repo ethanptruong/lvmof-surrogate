@@ -5,7 +5,7 @@ A modular Python pipeline for predicting MOF (Metal-Organic Framework) synthesis
 ## Installation
 
 ```bash
-pip install -r requirements.txt
+chmod +x install.sh && ./install.sh
 ```
 
 > **Note:** `mordred` requires `numpy < 2.0` for full compatibility. The `requirements.txt` pins `numpy==2.0.2` and applies a compatibility patch at import time in `featurization.py`.
@@ -66,11 +66,39 @@ impute (median) → vt (VarianceThreshold) → [cl (ContrastiveMITransformer)] �
 
 ### Cross-validation strategy
 
-`StratifiedGroupKFold(n_splits=3)` with groups assigned by KMeans clustering on a 2D UMAP embedding. Group selection sweeps `k ∈ [8, 30)` and picks the `k` maximizing silhouette score while ensuring ≥ 5 crystalline samples in every validation fold.
+`StratifiedGroupKFold(n_splits=3, shuffle=True, random_state=42)` with groups assigned by KMeans clustering on a 2D UMAP embedding. Group selection sweeps `k ∈ [8, 30)` and picks the `k` maximizing silhouette score while ensuring ≥ 5 crystalline samples in every validation fold.
 
 ### Primary metric
 
 **QWK** (Quadratic Weighted Kappa) — penalizes predictions proportionally to the squared distance from the true ordinal label.
+
+## Reproducibility
+
+All stochastic components are seeded with `SEED = 42`. On startup, `main.py` sets:
+
+```python
+random.seed(42)
+numpy.random.seed(42)
+torch.manual_seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark     = False
+torch.cuda.manual_seed_all(42)      # if CUDA is available
+```
+
+The seed propagates to every component in the pipeline:
+
+| Component | Mechanism |
+|-----------|-----------|
+| Optuna XGB & RF studies | `TPESampler(seed=42)` |
+| `StratifiedGroupKFold` | `random_state=42` |
+| `KMeans` (group selection & pre-VT) | `random_state=42` |
+| `UMAP` embedding | `random_state=42` |
+| `SMOTE` oversampling | `random_state=42` |
+| `ContrastiveMITransformer` (supcon & triplet) | `random_state=42` + seeded `torch.Generator` |
+| `WeightedRandomSampler` | seeded `torch.Generator` |
+| `AdaptiveSelectKBest` / `SafeMISelectKBest` (MI) | `random_state=42` |
+| `RandomForestClassifier` | `random_state=42` |
+| `XGBClassifier` | `random_state=42` (via `XGB_FIXED`) |
 
 ## Featurization Block Summary
 

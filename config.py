@@ -97,7 +97,7 @@ XGB_TUNED_KEYS = {
 MI_K         = 5500
 CL_EMB_DIM   = 128
 RANDOM_STATE = 42
-CV_NJOBS     = -1
+CV_NJOBS     = 1   # Windows: XGBoost/RF multiprocessing + joblib causes access violations
 
 # ── ChemBERTa ────────────────────────────────────────────────────────────────
 CHEMBERTA_MODEL = "DeepChem/ChemBERTa-77M-MTR"

@@ -33,7 +33,7 @@ def objective_xgb(trial, X, y, cv, groups):
     pipe   = make_xgb_pipe(param, with_cl=False)          # same structure as final pipe
     cv_res = cross_validate(
         pipe, X, y, cv=cv, groups=groups,
-        scoring=scoring_ordinal, n_jobs=-1, return_train_score=False,
+        scoring=scoring_ordinal, n_jobs=1, return_train_score=False,
     )
     fold_qwk = cv_res["test_qwk"]
     fold_mae = cv_res["test_mae"]
@@ -72,7 +72,7 @@ def objective_rf(trial, X, y, cv, groups):
     pipe   = make_rf_pipe(param, with_cl=False)            # ← same structure as final pipe
     scores = cross_val_score(
         pipe, X, y, cv=cv, groups=groups,
-        scoring=scoring_ordinal["qwk"], n_jobs=-1,
+        scoring=scoring_ordinal["qwk"], n_jobs=1,
     )
     return np.mean(scores)
 
@@ -266,12 +266,12 @@ def make_progress_callback(label):
     return progress_callback
 
 
-def run_study(label, model_type, with_cl, stage1_trials=15, stage2_trials=35):
+def run_study(label, model_type, with_cl, stage1_trials=15, stage2_trials=85):
     print(f"\n{'='*80}")
     print(f"TUNING: {label}")
     print(f"{'='*80}")
 
-    sampler = optuna.samplers.TPESampler(seed=RANDOM_STATE)
+    sampler = optuna.samplers.TPESampler(seed=42)
     study = optuna.create_study(direction="maximize", sampler=sampler, study_name=label)
 
     objective = make_objective(model_type=model_type, with_cl=with_cl)

@@ -5,7 +5,7 @@ for the LVMOF-Surrogate pipeline.
 
 import numpy as np
 import pandas as pd
-
+from drfp import DrfpEncoder
 from featurization import (
     get_metal_descriptors, get_precursor_geometry,
     get_physicochem_10, get_tepid_value,
@@ -24,8 +24,8 @@ from featurization import (
     finite, _f,
     BERT_DIM, _N_TOTAL, _EXT_RDKIT_BASE_NAMES,
     embed_organic_3d, run_soap_block, SOAP_DIM,
-    DrfpEncoder,
     parse_oxidation_state, get_d_electron_count, get_cbc,
+    make_rxn_smiles
 )
 from data_processing import clean_smiles
 from config import (
@@ -43,20 +43,23 @@ def build_metal_features(df_merged):
     Build metal descriptor features (Block A: mendeleev + OHE).
     Returns (X_metal_block_aug, metal_names_aug).
     """
-    from featurization import (
-        get_metal_descriptors, lookup_metal_descriptors,
-        metal_descriptor_cache, METAL_DESCRIPTOR_NAMES, N_METAL_DESCRIPTORS,
-    )
+    from featurization import get_metal_descriptors, lookup_metal_descriptors
 
-    # Ensure metal_atom column exists
     if 'metal_atom' not in df_merged.columns:
         raise KeyError("df_merged must have 'metal_atom' column (from df_inventory merge).")
 
-    # Map descriptors
-    metal_descriptor_rows = df_merged['metal_atom'].apply(lookup_metal_descriptors)
+    metal_descriptor_cache = {
+        sym: get_metal_descriptors(sym) for sym in TARGET_METALS
+    }
+    zero_descriptor = get_metal_descriptors("XYZ")
+    metal_descriptor_names = list(next(iter(metal_descriptor_cache.values())).keys())
+
+    metal_descriptor_rows = df_merged['metal_atom'].apply(
+        lambda s: lookup_metal_descriptors(s, metal_descriptor_cache, zero_descriptor)
+    )
 
     X_metal = np.array([
-        [row[name] for name in METAL_DESCRIPTOR_NAMES]
+        [row[name] for name in metal_descriptor_names]
         for row in metal_descriptor_rows
     ], dtype=float)
 
@@ -64,7 +67,6 @@ def build_metal_features(df_merged):
     if bad.any():
         X_metal[bad] = 0.0
 
-    # One-hot encode metal identity
     metal_ohe_df = pd.get_dummies(
         df_merged['metal_atom'].fillna('Unknown'),
         prefix='metal_is'
@@ -78,21 +80,18 @@ def build_metal_features(df_merged):
     ohe_cols = sorted([c for c in metal_ohe_df.columns if c.startswith('metal_is_')])
     metal_ohe_df = metal_ohe_df[ohe_cols]
     X_metal_ohe = metal_ohe_df.values.astype(float)
-    metal_names = METAL_DESCRIPTOR_NAMES + ohe_cols
+    metal_names = metal_descriptor_names + ohe_cols
 
-    # Parse oxidation state and d-electron count
     df_merged['precursor_ox_state'] = df_merged['precursor_iupac_standardized'].apply(parse_oxidation_state)
     df_merged['d_electron_count'] = df_merged.apply(
         lambda r: get_d_electron_count(r['metal_atom'], r['precursor_ox_state']),
         axis=1
     )
 
-    # CBC lookup
     df_merged['precursor_nL'], df_merged['precursor_nX'] = zip(
         *df_merged['precursor_iupac_standardized'].apply(get_cbc)
     )
 
-    # Geometry feature block
     geom_rows = df_merged.apply(
         lambda r: get_precursor_geometry(
             r.get('smiles_precursor_canon', r.get('smiles_precursor', '')),
@@ -147,15 +146,16 @@ def build_metal_features(df_merged):
     ])
 
     d_electron_names = ['metal_d_electron_count', 'metal_precursor_ox_state']
-    prec_geom_names  = [f'precgeom_{g}' for g in GEOMETRY_LABELS]
-    cbc_names        = ['precursor_nL', 'precursor_nX']
-    tec_names        = ['tec_covalent', 'tec_delta18', 'tec_delta16',
-                        'tec_is_18e', 'tec_is_16e', 'tec_is_other', 'tec_cbc_known']
+    prec_geom_names = [f'precgeom_{g}' for g in GEOMETRY_LABELS]
+    cbc_names = ['precursor_nL', 'precursor_nX']
+    tec_names = [
+        'tec_covalent', 'tec_delta18', 'tec_delta16',
+        'tec_is_18e', 'tec_is_16e', 'tec_is_other', 'tec_cbc_known'
+    ]
 
-    metal_names_aug = (metal_names + d_electron_names
-                       + prec_geom_names + cbc_names + tec_names)
-
+    metal_names_aug = metal_names + d_electron_names + prec_geom_names + cbc_names + tec_names
     return X_metal_block_aug, metal_names_aug
+
 
 
 def build_precursor_auxiliary_features(df_merged):
@@ -681,13 +681,13 @@ def build_halide_block(df_merged, df_inventory):
     Br_cols = [c for c in Br_cols if c in df_inventory.columns]
     Cl_cols = [c for c in Cl_cols if c in df_inventory.columns]
 
-    df_inventory['halide_I_count']  = df_inventory[I_cols].sum(axis=1)  if I_cols  else 0.0
-    df_inventory['halide_Br_count'] = df_inventory[Br_cols].sum(axis=1) if Br_cols else 0.0
-    df_inventory['halide_Cl_count'] = df_inventory[Cl_cols].sum(axis=1) if Cl_cols else 0.0
-    df_inventory['halide_count']    = (df_inventory['halide_I_count'] +
-                                       df_inventory['halide_Br_count'] +
-                                       df_inventory['halide_Cl_count'])
-    df_inventory['halide_present']  = (df_inventory['halide_count'] > 0).astype(float)
+    df_inventory.loc[:, 'halide_I_count']  = df_inventory[I_cols].sum(axis=1)  if I_cols  else 0.0
+    df_inventory.loc[:, 'halide_Br_count'] = df_inventory[Br_cols].sum(axis=1) if Br_cols else 0.0
+    df_inventory.loc[:, 'halide_Cl_count'] = df_inventory[Cl_cols].sum(axis=1) if Cl_cols else 0.0
+    df_inventory.loc[:, 'halide_count']   = (df_inventory['halide_I_count'] +
+                                              df_inventory['halide_Br_count'] +
+                                              df_inventory['halide_Cl_count'])
+    df_inventory.loc[:, 'halide_present'] = (df_inventory['halide_count'] > 0).astype(float)
 
     def _halide_type(row):
         if row['halide_I_count']  > 0: return 1.0
@@ -695,7 +695,7 @@ def build_halide_block(df_merged, df_inventory):
         if row['halide_Cl_count'] > 0: return 3.0
         return 0.0
 
-    df_inventory['halide_type'] = df_inventory.apply(_halide_type, axis=1)
+    df_inventory.loc[:, 'halide_type'] = df_inventory.apply(_halide_type, axis=1)
 
     Xhalide_full = (
         pd.DataFrame({'experiment_id': df_merged['experiment_id'].values})
@@ -723,6 +723,7 @@ def build_drfp_block(df_merged):
                 parts.append(str(val).strip())
         return '.'.join(parts) + '>>' if parts else '>>'
 
+    
     rxn_smiles_list = df_merged.apply(make_rxn_smiles, axis=1).tolist()
 
     X_drfp = np.array(DrfpEncoder.encode(
@@ -855,7 +856,26 @@ def assemble_features(df_merged, df_inventory):
     X_metal_block_aug, metal_names_aug = build_metal_features(df_merged)
 
     # Keep X_metal_block (just continuous + OHE, without aug extras) for older concat
-    from featurization import METAL_DESCRIPTOR_NAMES
+    from featurization import get_metal_descriptors, lookup_metal_descriptors
+
+    metal_ohe_df = pd.get_dummies(
+        df_merged['metal_atom'].fillna('Unknown'),
+        prefix='metal_is'
+    )
+    for sym in TARGET_METALS:
+        col = f'metal_is_{sym}'
+        if col not in metal_ohe_df.columns:
+            metal_ohe_df[col] = 0
+    ohe_cols = sorted([c for c in metal_ohe_df.columns if c.startswith('metal_is_')])
+    metal_ohe_df = metal_ohe_df[ohe_cols]
+    X_metal_ohe = metal_ohe_df.values.astype(float)
+
+    metal_descriptor_cache = {
+    sym: get_metal_descriptors(sym) for sym in TARGET_METALS
+    }
+    zero_descriptor = get_metal_descriptors("XYZ")
+    metal_descriptor_names = list(next(iter(metal_descriptor_cache.values())).keys())
+
     metal_ohe_df = pd.get_dummies(
         df_merged['metal_atom'].fillna('Unknown'),
         prefix='metal_is'
@@ -869,15 +889,18 @@ def assemble_features(df_merged, df_inventory):
     X_metal_ohe = metal_ohe_df.values.astype(float)
 
     metal_descriptor_rows = df_merged['metal_atom'].apply(
-        lambda s: __import__('featurization').lookup_metal_descriptors(s)
+        lambda s: lookup_metal_descriptors(s, metal_descriptor_cache, zero_descriptor)
     )
+
     X_metal = np.array([
-        [row[name] for name in METAL_DESCRIPTOR_NAMES]
+        [row[name] for name in metal_descriptor_names]
         for row in metal_descriptor_rows
     ], dtype=float)
+
     bad = ~np.isfinite(X_metal)
     if bad.any():
         X_metal[bad] = 0.0
+
     X_metal_block = np.hstack([X_metal, X_metal_ohe])
 
     X_final = np.concatenate([
