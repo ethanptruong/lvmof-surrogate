@@ -664,7 +664,7 @@ def make_cl_transformer():
     return ContrastiveMITransformer(
         embedding_dim=128,
         hidden_dim=512,
-        n_epochs=15,
+        epochs=15,
         lr=1e-4,
         weight_decay=1e-4,
         batch_size=128,

@@ -1,5 +1,3 @@
-numpy<2
-pandas
 openpyxl
 rdkit==2025.9.6
 scipy==1.17.0

@@ -1,15 +1,20 @@
 """
 dimensionality.py
-Dimensionality reduction, UMAP, KMeans grouping, MI diagnostic,
+Dimensionality reduction, KMeans grouping, MI diagnostic,
 process variable interaction building, and CV matrix assembly.
+
+Group assignment uses PCA (50 components) + KMeans instead of UMAP for
+cross-platform reproducibility. UMAP's approximate nearest-neighbor graph
+gives different embeddings on Windows vs Linux even with the same
+random_state, shifting CV groups and QWK by ±10-15 points.
 """
 
 import warnings
 import numpy as np
 import pandas as pd
-import umap
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, MinMaxScaler
 from sklearn.feature_selection import (VarianceThreshold, SelectKBest,
                                        mutual_info_classif)
@@ -179,23 +184,28 @@ def assemble_cv_matrix(X_vt, Xprocnorm, interactions) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────
-# build_umap_embedding
+# build_pca_embedding
 # ─────────────────────────────────────────────────────────────
-def build_umap_embedding(X_for_umap) -> np.ndarray:
+def build_pca_embedding(X_for_embedding, n_components=50) -> np.ndarray:
     """
-    Fit a 2D UMAP embedding on X_for_umap (MI-filtered view).
+    Fit a PCA embedding on X_for_embedding (MI-filtered view).
+
+    Uses 50 components (vs 2 for UMAP) to retain more chemical variance
+    for KMeans clustering, while remaining fully deterministic across
+    Windows and Linux.
 
     Returns
     -------
-    X_2d : np.ndarray  shape (n, 2)
+    X_pca : np.ndarray  shape (n, n_components)
     """
-    warnings.filterwarnings('ignore', message='Graph is not fully connected')
-    print(f"UMAP input (MI-filtered, groups only): {X_for_umap.shape}")
-    reducer = umap.UMAP(n_components=2, random_state=RANDOM_STATE,
-                        n_neighbors=15, min_dist=0.1)
-    X_2d = reducer.fit_transform(X_for_umap)
-    print(f"UMAP done: {X_2d.shape}")
-    return X_2d
+    n_components = min(n_components, X_for_embedding.shape[0] - 1,
+                       X_for_embedding.shape[1])
+    print(f"PCA input: {X_for_embedding.shape}  →  {n_components} components")
+    reducer = PCA(n_components=n_components, random_state=RANDOM_STATE)
+    X_pca = reducer.fit_transform(X_for_embedding)
+    var_explained = reducer.explained_variance_ratio_.sum()
+    print(f"PCA done: {X_pca.shape}  (cumulative variance explained: {var_explained:.3f})")
+    return X_pca
 
 
 # ─────────────────────────────────────────────────────────────

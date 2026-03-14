@@ -20,7 +20,7 @@ from config import COLMAP, N_CLUSTERS, RANDOM_STATE
 from data_processing import load_data, build_inventory, merge_data, run_process_variable_audit
 from feature_assembly import assemble_features
 from dimensionality import (prepare_labels, remap_score, apply_variance_threshold,
-                             build_umap_embedding, select_kmeans_groups,
+                             build_pca_embedding, select_kmeans_groups,
                              run_mi_diagnostic, build_process_interactions,
                              assemble_cv_matrix)
 from models import (scoring_ordinal, FrankHallOrdinalClassifier,
@@ -95,8 +95,8 @@ def main(data_path=None):
         X_vt, vt_pre = apply_variance_threshold(X_raw)
         mi_pre = run_mi_diagnostic(X_vt, y)
         Xprocnorm, interactions, _ = build_process_interactions(df_merged, mask, process_cols_present)
-        X_for_umap = assemble_cv_matrix(mi_pre.transform(X_vt), Xprocnorm, interactions)
-        X_2d = build_umap_embedding(X_for_umap)
+        X_for_pca = assemble_cv_matrix(mi_pre.transform(X_vt), Xprocnorm, interactions)
+        X_2d = build_pca_embedding(X_for_pca)
         X_cv = assemble_cv_matrix(X_vt, Xprocnorm, interactions)
         groups, best_k, cv = select_kmeans_groups(X_2d, y)
 
