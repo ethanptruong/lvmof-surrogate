@@ -178,3 +178,5 @@ The feature matrix is assembled from 12 descriptor blocks:
 - **Source:** `drfp`
 - **Description:** Encodes the reaction as a whole (precursor + linker + modulator).
 - **Key Features:** 2048-bit hashed fingerprint capturing the chemical transformation and local environments of all reactants simultaneously.
+
+I might try to play around with the parameters of XGBoost and RF. I have found that performance differs based on which operating system you use. 
