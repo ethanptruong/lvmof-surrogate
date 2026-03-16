@@ -970,3 +970,213 @@ def assemble_features(df_merged, df_inventory):
     return (X_final, df_merged, fp_cols, num_descriptors, calc,
             linker_col, mod_col, process_cols_present, X_process,
             X_linker, X_modulator, mod_eq, X_precursor_perlig, Xinventorynumeric)
+
+
+# ─────────────────────────────────────────────────────────────
+# Feature name / group catalog for SHAP
+# ─────────────────────────────────────────────────────────────
+
+_PHYSCHEM_NAMES = [
+    'MolWt', 'MolLogP', 'TPSA', 'NumRotatableBonds',
+    'NumHAcceptors', 'NumHDonors', 'MaxPartialCharge_clean',
+    'HallKierAlpha', 'NumAromaticRings', 'MaxPartialCharge_missing',
+]
+
+_METAL_DESC_NAMES = [
+    'metal_atomic_number', 'metal_period', 'metal_group',
+    'metal_en_pauling', 'metal_en_allen',
+    'metal_covalent_radius_pm', 'metal_atomic_radius_pm',
+    'metal_vdw_radius_pm',
+    'metal_ionization_energy1_eV', 'metal_ionization_energy2_eV',
+    'metal_electron_affinity_eV', 'metal_nvalence',
+    'metal_max_oxidation_state', 'metal_min_oxidation_state',
+    'metal_common_oxidation_states_count', 'metal_mendeleev_number',
+    'metal_hardness_eV', 'metal_dipole_polarizability_bohr3',
+    'metal_missing_flag',
+]
+
+_TOPO_NAMES = [
+    'BalabanJ', 'BertzCT', 'Chi0', 'Chi1', 'Chi2n', 'Chi3n',
+    'Kappa1', 'Kappa2', 'Kappa3', 'WienerIndex',
+    'Fsp3', 'FractionCSP3', 'LabuteASA', 'topo_missing',
+]
+
+_INTERACTION_NAMES = [
+    'proc_int:temp_x_metal_ratio',
+    'proc_int:temp_x_rxn_hours',
+    'proc_int:metal_ratio_x_rxn_hours',
+    'proc_int:temp_sq',
+    'proc_int:metal_ratio_sq',
+    'proc_int:hightemp_flag',
+]
+
+
+def build_feature_catalog(
+    X_final, X_linker, X_modulator, mod_eq,
+    X_precursor_perlig, Xinventorynumeric, X_process,
+    fp_cols, num_descriptors, ohe_cols,
+    process_cols_present, n_clusters,
+    X_modulator_rac_aug, X_metal_block,
+    Xprecursor_full, X_precursor_perlig_rac,
+    X_linker_phys10, X_modulator_phys10,
+    X_modulator_tep, X_linker_tep, X_precursor_perlig_tep,
+    X_precursor_perlig_steric,
+    X_chemberta_block, chemberta_names,
+    X_g14_block, g14_names,
+    Xlinker_ttp,
+    X_linker_extra,
+    Xhalide_full,
+    X_drfp,
+    X_soap_precursor, X_soap_linker, soap_names,
+    vt_mask,
+):
+    """Build feature name and group arrays for the full X_cv matrix.
+
+    Parameters correspond to the arrays produced during assemble_features()
+    and the subsequent dimensionality reduction steps.
+
+    Returns
+    -------
+    names  : list[str]  — feature names for X_cv columns
+    groups : list[str]  — feature group labels for X_cv columns
+    """
+    names = []
+    groups = []
+
+    def _push(n_list, g_label):
+        names.extend(n_list)
+        groups.extend([g_label] * len(n_list))
+
+    n_fp_lig = len(fp_cols)
+
+    # ── X_features block (concat step 4 in assemble_features) ──
+    # 1. Linker Morgan FP
+    _push([f'linker_fp_{i:04d}' for i in range(X_linker.shape[1])],
+          "Linker Morgan FP")
+    # 2. Modulator Morgan FP
+    _push([f'mod_fp_{i:04d}' for i in range(X_modulator.shape[1])],
+          "Modulator Morgan FP")
+    # 3. Modulator equivalents
+    _push(['mod_equivalents'], "Modulator Equiv.")
+    # 4. Per-ligand precursor FP
+    for j, col in enumerate(fp_cols):
+        token = col.replace('Total_', '')
+        _push([f'perlig_{token}_fp_{i:04d}' for i in range(2048)] + [f'perlig_{token}_count'],
+              "Precursor Ligand FP")
+    # 5. Inventory numeric
+    _push([f'inv_num_{i}' for i in range(Xinventorynumeric.shape[1])],
+          "Inventory Numeric")
+    # 6. Process variables (raw, in X_features)
+    _push([f'proc_raw:{c}' for c in process_cols_present],
+          "Process Variables (raw)")
+
+    # ── Mordred RAC block ──
+    _push([f'mod_rac_{i}' for i in range(num_descriptors)]
+          + ['mod_rac_any_bad', 'mod_rac_frac_bad'],
+          "Modulator RAC")
+
+    # ── Metal block (continuous descriptors + OHE) ──
+    _push(_METAL_DESC_NAMES, "Metal Center (mendeleev)")
+    _push(list(ohe_cols), "Metal Center (mendeleev)")
+
+    # ── Precursor full block (metal center + coligand + complex) ──
+    _push([f'prec_metal_center_{i}' for i in range(METAL_BLOCK_DIM)],
+          "Metal Precursor Complex")
+    _push([f'prec_coligand_{i}' for i in range(COLIGAND_BLOCK_DIM)],
+          "Metal Precursor Complex")
+    _push([f'prec_complex_{i}' for i in range(COMPLEX_BLOCK_DIM)],
+          "Metal Precursor Complex")
+
+    # ── Per-ligand RAC ──
+    D = num_descriptors
+    for j, col in enumerate(fp_cols):
+        token = col.replace('Total_', '')
+        _push([f'perlig_{token}_rac_{i}' for i in range(D)]
+              + [f'perlig_{token}_rac_anybad', f'perlig_{token}_rac_fracbad',
+                 f'perlig_{token}_rac_count'],
+              "Precursor Ligand RAC")
+
+    # ── Physicochem ──
+    _push([f'linker_{n}' for n in _PHYSCHEM_NAMES], "Linker Physchem/FP")
+    _push([f'mod_{n}' for n in _PHYSCHEM_NAMES], "Mod Physchem/FP")
+
+    # ── TEP ──
+    _push(['mod_tep_val', 'mod_tep_missing'], "Ligand TEP (Electronic)")
+    _push(['linker_tep_val', 'linker_tep_missing'], "Ligand TEP (Electronic)")
+    for j, col in enumerate(fp_cols):
+        token = col.replace('Total_', '')
+        _push([f'perlig_{token}_tep_val', f'perlig_{token}_tep_miss',
+               f'perlig_{token}_tep_count'],
+              "Ligand TEP (Electronic)")
+
+    # ── Steric ──
+    for j, col in enumerate(fp_cols):
+        token = col.replace('Total_', '')
+        _push([f'perlig_{token}_cone_angle', f'perlig_{token}_buried_vol',
+               f'perlig_{token}_steric_miss', f'perlig_{token}_steric_count'],
+              "Ligand Sterics")
+
+    # ── ChemBERTa block ──
+    # chemberta_names already has per-role names from build_chemberta_block()
+    # Split into groups: linker bert / linker physchem-fp / mod bert / mod physchem-fp
+    per_mol = len(chemberta_names) // 2
+    for i, n in enumerate(chemberta_names[:per_mol]):
+        names.append(n)
+        groups.append("Linker ChemBERT" if i < BERT_DIM else "Linker Physchem/FP")
+    for i, n in enumerate(chemberta_names[per_mol:]):
+        names.append(n)
+        groups.append("Mod ChemBERT" if i < BERT_DIM else "Mod Physchem/FP")
+
+    # ── G14 ──
+    n_hub = len(G14_HUB_NAMES)
+    n_smarts = len(ALL_G14_SMARTS_NAMES)
+    for i, n in enumerate(g14_names):
+        names.append(n)
+        # First 2*n_hub are hub features, rest are SMARTS
+        groups.append("G14 Hub Topology" if i < 2 * n_hub else "G14 Hub SMARTS")
+
+    # ── TTP ──
+    _push(list(TTP_FEATURE_NAMES), "Linker TTP")
+
+    # ── Linker extra (EState 79, Topo 14, Torsion 1024, AtomPair 2048) ──
+    _push([f'linker_estate_{i}' for i in range(79)], "Linker EState")
+    _push([f'linker_{n}' for n in _TOPO_NAMES], "Linker Topological")
+    _push([f'linker_torsion_{i:04d}' for i in range(1024)], "Linker Torsion FP")
+    _push([f'linker_atompair_{i:04d}' for i in range(2048)], "Linker Atom-Pair FP")
+
+    # ── Halide ──
+    _push(list(HALIDE_FEAT_COLS), "Halide Features")
+
+    # ── DRFP ──
+    _push([f'drfp_{i}' for i in range(2048)], "Reaction FP (DRFP)")
+
+    # ── SOAP ──
+    n_soap_prec = X_soap_precursor.shape[1]
+    n_soap_link = X_soap_linker.shape[1]
+    _push([f'soap_precursor_{i}' for i in range(n_soap_prec)], "3D SOAP (Precursor)")
+    _push([f'soap_linker_{i}' for i in range(n_soap_link)], "3D SOAP (Linker)")
+
+    # ── KMeans cluster OHE (appended by apply_variance_threshold) ──
+    _push([f'kmeans_cluster_{i}' for i in range(n_clusters)], "KMeans Cluster OHE")
+
+    # Sanity check vs X_final + cluster OHE
+    n_xfinal_plus_ohe = X_final.shape[1] + n_clusters
+    if len(names) != n_xfinal_plus_ohe:
+        print(f"[WARN] Feature catalog has {len(names)} names but "
+              f"X_final+OHE has {n_xfinal_plus_ohe} columns. "
+              f"Delta = {len(names) - n_xfinal_plus_ohe}")
+
+    # ── Apply VT mask ──
+    names_arr = np.array(names, dtype=object)
+    groups_arr = np.array(groups, dtype=object)
+    vt_names = list(names_arr[vt_mask])
+    vt_groups = list(groups_arr[vt_mask])
+
+    # ── Append process (normalized) + interactions ──
+    vt_names += [f'proc:{c}' for c in process_cols_present]
+    vt_groups += ['Process Variables'] * len(process_cols_present)
+
+    vt_names += _INTERACTION_NAMES
+    vt_groups += ['Process Interactions'] * len(_INTERACTION_NAMES)
+
+    return vt_names, vt_groups

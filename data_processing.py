@@ -160,6 +160,55 @@ def add_parse_diagnostics(df, colmap, keys=("precursor","linker1","modulator","l
 def load_data(file_path: str) -> pd.DataFrame:
     """Load the experiment dataset from an Excel file."""
     df = pd.read_excel(file_path)
+    # Drop artifact columns (unnamed Excel leftovers that are 100% empty)
+    unnamed = [c for c in df.columns if str(c).startswith("Unnamed")]
+    df = df.drop(columns=unnamed, errors="ignore")
+    return df
+
+
+# ── Missing value handling ─────────────────────────────────────────────────────
+
+# Structural absence: no second/third solvent was used → 0 is the correct value.
+_STRUCTURAL_ZERO_COLS = [
+    "solvent_2_volume_ml",
+    "solvent_2_fraction",
+    "solvent_3_volume_ml",
+    "solvent_3_fraction",
+]
+
+# Data-quality gaps: conditions not recorded → impute with median + add missing flag.
+# A binary <col>_missing column is added so the model can learn that the imputed
+# value is uncertain, rather than treating it as a real measurement.
+_MEDIAN_IMPUTE_COLS = [
+    "reaction_hours",
+    "temperature_k",
+]
+
+
+def fix_missingness(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Apply physically-motivated missing-value treatment before featurization.
+
+    - Structural absence columns (no second/third solvent): fill with 0.
+    - Data-quality gaps (reaction_hours, temperature_k): fill with column median
+      and add a binary <col>_missing indicator column so the model knows the
+      value was unknown rather than a real measurement.
+
+    All other columns are left as-is; the pipeline's SimpleImputer handles
+    any remaining NaN from featurization failures.
+    """
+    df = df.copy()
+
+    for col in _STRUCTURAL_ZERO_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+
+    for col in _MEDIAN_IMPUTE_COLS:
+        if col in df.columns:
+            series = pd.to_numeric(df[col], errors="coerce")
+            df[f"{col}_missing"] = series.isna().astype(float)
+            df[col] = series.fillna(series.median())
+
     return df
 
 

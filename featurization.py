@@ -1950,16 +1950,35 @@ soap = SOAP(
     average='outer',   # one vector per molecule
     sparse=False
 )
-SOAP_DIM = soap.get_number_of_features()
+# +1 for the per-row "soap_available" flag appended by run_soap_block
+SOAP_DIM = soap.get_number_of_features() + 1
+
+
+# Hardcoded geometries for small/rigid molecules that defeat ETKDGv3.
+# Keys are canonical SMILES; values are (coords_Å, atomic_numbers).
+_HARDCODED_3D = {
+    # Carbon monoxide: linear, experimental C≡O bond length 1.128 Å
+    "C#O":        (np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.128]]), np.array([6, 8])),
+    "[C-]#[O+]":  (np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.128]]), np.array([6, 8])),
+}
 
 
 def embed_organic_3d(smiles):
     """
     Multi-strategy ETKDGv3 + UFF embedding for organic (metal-free) SMILES.
     Returns (heavy_atom_coords, nuclear_charges) or (None, None) on failure.
+
+    Falls back to _HARDCODED_3D for small/rigid molecules (e.g. C#O) that
+    ETKDGv3 cannot embed.
     """
     if not isinstance(smiles, str) or not smiles.strip():
         return None, None
+
+    # Check hardcoded table first (covers CO and its resonance form)
+    if smiles in _HARDCODED_3D:
+        coords, charges = _HARDCODED_3D[smiles]
+        return coords.copy(), charges.copy()
+
     try:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
@@ -2024,7 +2043,7 @@ def run_soap_block(label, smiles_series):
         s for s in smiles_series.dropna().astype(str).map(str.strip).unique()
         if s
     ]
-    print(f"\n── {label}: {len(unique_smiles)} unique structures ──")
+    print(f"\n-- {label}: {len(unique_smiles)} unique structures --")
 
     # Step 1: Generate conformers
     conform_cache = {}
@@ -2047,12 +2066,13 @@ def run_soap_block(label, smiles_series):
     n_ok = sum(1 for v in conform_cache.values() if v is not None)
     print(f"  Conformers: {n_ok}/{len(unique_smiles)} succeeded")
 
-    # Step 2: Generate SOAP vectors
+    # Step 2: Generate SOAP vectors (raw descriptor only, flag appended in Step 4)
+    _soap_raw_dim = soap.get_number_of_features()
     vec_cache = {}
     for smi in unique_smiles:
         entry = conform_cache[smi]
         if entry is None:
-            vec_cache[smi] = np.zeros(SOAP_DIM, dtype=np.float32)
+            vec_cache[smi] = np.zeros(_soap_raw_dim, dtype=np.float32)
             continue
         try:
             coords, charges = entry
@@ -2063,22 +2083,31 @@ def run_soap_block(label, smiles_series):
             vec_cache[smi] = vec
         except Exception as e:
             print(f"  SOAP FAILED {smi[:45]}: {e}")
-            vec_cache[smi] = np.zeros(SOAP_DIM, dtype=np.float32)
+            vec_cache[smi] = np.zeros(_soap_raw_dim, dtype=np.float32)
 
     # Step 3: Map to full dataset
-    X = np.stack(smiles_series.apply(
+    _zero_raw = np.zeros(_soap_raw_dim, dtype=np.float32)
+
+    X_soap = np.stack(smiles_series.apply(
         lambda s: vec_cache.get(
             str(s).strip() if pd.notna(s) else '',
-            np.zeros(SOAP_DIM, dtype=np.float32)
+            _zero_raw
         )
     ).values)
 
-    n_zero = (X.sum(axis=1) == 0).sum()
+    # Step 4: Append "soap_available" flag (1 = conformer succeeded, 0 = zero-padded)
+    available_flag = smiles_series.apply(
+        lambda s: float(conform_cache.get(str(s).strip() if pd.notna(s) else '', None) is not None)
+    ).values.reshape(-1, 1).astype(np.float32)
+
+    X = np.hstack([X_soap, available_flag])
+
+    n_zero = (X_soap.sum(axis=1) == 0).sum()
     bad = ~np.isfinite(X)
     if bad.any():
         print(f"  WARNING: {bad.sum()} non-finite values → replacing with 0.0")
         X[bad] = 0.0
-    print(f"  Output shape: {X.shape}  |  zero-vector rows: {n_zero}/{len(X)}")
+    print(f"  Output shape: {X.shape}  |  zero-vector rows: {n_zero}/{len(X_soap)}")
 
-    names = [f'soap_{label.lower()}_{i}' for i in range(SOAP_DIM)]
+    names = [f'soap_{label.lower()}_{i}' for i in range(_soap_raw_dim)] + [f'soap_{label.lower()}_available']
     return X, names

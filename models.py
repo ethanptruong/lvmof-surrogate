@@ -1,7 +1,6 @@
 """
 models.py
 Model classes, metric functions, scoring dict, and pipeline factory functions.
-All class bodies and function bodies copied EXACTLY from the source notebook.
 """
 
 import warnings
@@ -16,16 +15,13 @@ from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin, clone
 from sklearn.utils.validation import check_X_y, check_array, check_is_fitted
 from sklearn.metrics import make_scorer
 from sklearn.model_selection import cross_val_predict
-from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.feature_selection import (VarianceThreshold, SelectKBest,
                                        mutual_info_classif)
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.cluster import KMeans
-from sklearn.metrics import silhouette_score
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.utils.class_weight import compute_sample_weight
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
 
@@ -83,6 +79,57 @@ class FrankHallOrdinalClassifier(BaseEstimator, ClassifierMixin):
     def predict(self, X):
         check_is_fitted(self, ["classifiers_", "classes_"])
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
+
+    def predict_proba_per_threshold(self, X):
+        """Return dict {k: P(y > k | x)} for each threshold k."""
+        check_is_fitted(self, ["classifiers_", "classes_"])
+        X = check_array(X)
+        return {k: clf.predict_proba(X)[:, 1]
+                for k, clf in self.classifiers_.items()}
+
+    def predict_proba_with_uncertainty(self, X, n_samples=200):
+        """
+        Monte Carlo uncertainty from per-threshold classifiers.
+
+        For RF base estimators, samples individual trees to get variance
+        on class probabilities.  Returns (mean_proba, std_proba) each
+        shaped (n_samples_X, n_classes).
+        """
+        check_is_fitted(self, ["classifiers_", "classes_"])
+        X = check_array(X)
+        n = X.shape[0]
+        K = len(self.classes_)
+
+        # Collect per-tree predictions for each threshold classifier
+        all_proba_samples = []
+        for _ in range(n_samples):
+            probas_gt = {-1: np.ones(n)}
+            for k, clf in self.classifiers_.items():
+                if hasattr(clf, 'estimators_'):
+                    # RF: sample a random tree
+                    tree_idx = np.random.randint(len(clf.estimators_))
+                    tree = clf.estimators_[tree_idx]
+                    p = tree.predict_proba(X)
+                    # Handle case where tree didn't see both classes
+                    if p.shape[1] == 1:
+                        probas_gt[k] = np.zeros(n)
+                    else:
+                        probas_gt[k] = p[:, 1]
+                else:
+                    probas_gt[k] = clf.predict_proba(X)[:, 1]
+            probas_gt[self.classes_[-1]] = np.zeros(n)
+
+            probs = []
+            for i_cls, c in enumerate(self.classes_):
+                prev = probas_gt[self.classes_[i_cls - 1] if i_cls > 0 else -1]
+                probs.append(np.maximum(0, prev - probas_gt[c]))
+            mat = np.column_stack(probs)
+            row_sums = mat.sum(axis=1, keepdims=True)
+            row_sums[row_sums == 0] = 1.0
+            all_proba_samples.append(mat / row_sums)
+
+        stacked = np.stack(all_proba_samples, axis=0)  # (n_samples, n_X, K)
+        return stacked.mean(axis=0), stacked.std(axis=0)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -154,14 +201,18 @@ def qwk_0_9(y_true, y_pred):
     den  = (W * E).sum()
     return 1.0 - (num / den if den > 0 else 0.0)
 
+
 def mae_0_9(y_true, y_pred):
     return np.mean(np.abs(np.asarray(y_true, float) - np.asarray(y_pred, float)))
+
 
 def within1(y_true, y_pred):
     return np.mean(np.abs(np.asarray(y_true, float) - np.asarray(y_pred, float)) <= 1.0)
 
+
 def exact_acc(y_true, y_pred):
     return np.mean(np.asarray(y_true, int) == np.asarray(y_pred, int))
+
 
 scoring_ordinal = {
     "qwk":       make_scorer(qwk_0_9,   greater_is_better=True),
@@ -172,204 +223,124 @@ scoring_ordinal = {
 
 
 # ─────────────────────────────────────────────────────────────
-# SafeMISelectKBest
+# 3.  Supervised Contrastive Learning (SupCon)
 # ─────────────────────────────────────────────────────────────
-class SafeMISelectKBest(BaseEstimator, TransformerMixin):
-    def __init__(self, k=5500, with_cl=False, embedding_dim=128, random_state=42):
-        self.k = k
-        self.with_cl = with_cl
-        self.embedding_dim = embedding_dim
-        self.random_state = random_state
+class _SupConEncoder(nn.Module):
+    """MLP: input_dim → hidden_dim (BatchNorm + ReLU + Dropout(0.2)) → embedding_dim."""
 
-    def _make_discrete_mask(self, n_features):
-      if not self.with_cl:
-          return True
-
-      n_original = n_features - self.embedding_dim
-      if n_original <= 0:
-          raise ValueError(
-              f"Expected appended embedding_dim={self.embedding_dim}, got n_features={n_features}."
-          )
-
-      return np.r_[
-          np.ones(n_original, dtype=bool),      # original VT features
-          np.zeros(self.embedding_dim, dtype=bool)  # CL embedding
-      ]
-
-
-    def fit(self, X, y):
-        n_features = X.shape[1]
-        discrete_mask = self._make_discrete_mask(n_features)
-
-        self.scores_ = mutual_info_classif(
-            X, y,
-            discrete_features=discrete_mask,
-            random_state=self.random_state
-        )
-
-        if self.k == "all":
-            self.k_ = n_features
-        else:
-            self.k_ = min(int(self.k), n_features)
-
-        ranked = np.argsort(self.scores_)[::-1]
-        keep = ranked[:self.k_]
-        self.support_idx_ = np.sort(keep)
-        self.n_features_in_ = n_features
-        return self
-
-    def transform(self, X):
-        check_is_fitted(self, "support_idx_")
-        return X[:, self.support_idx_]
-
-    def get_support(self, indices=False):
-        check_is_fitted(self, "support_idx_")
-        if indices:
-            return self.support_idx_
-        mask = np.zeros(self.n_features_in_, dtype=bool)
-        mask[self.support_idx_] = True
-        return mask
-
-
-# ─────────────────────────────────────────────────────────────
-# ContrastiveMITransformer inner classes
-# ─────────────────────────────────────────────────────────────
-class _TripletDataset(Dataset):
-    def __init__(self, X, triplets):
-        self.X = torch.tensor(X, dtype=torch.float32)
-        self.triplets = triplets
-
-    def __len__(self):
-        return len(self.triplets)
-
-    def __getitem__(self, i):
-        a, p, n = self.triplets[i]
-        return self.X[a], self.X[p], self.X[n]
-
-
-
-class MLPEncoder(nn.Module):
-    def __init__(self, in_dim, hidden_dim=256, embedding_dim=128, dropout=0.2):
+    def __init__(self, input_dim, hidden_dim, embedding_dim):
         super().__init__()
-        h1 = hidden_dim
-        h2 = max(hidden_dim // 2, embedding_dim * 2)
         self.net = nn.Sequential(
-            nn.Linear(in_dim, h1),
-            nn.LayerNorm(h1),          
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(h1, h2),
-            nn.LayerNorm(h2),          
-            nn.ReLU(),
-            nn.Dropout(dropout / 2),
-            nn.Linear(h2, embedding_dim),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, embedding_dim),
         )
 
     def forward(self, x):
         return self.net(x)
 
 
-class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
+class SupConTrainer(BaseEstimator, TransformerMixin):
     """
-    sklearn-compatible contrastive feature augmenter.
+    Sklearn-compatible supervised contrastive feature augmenter.
 
-    Input to fit/transform:
-        X = pipeline features AFTER impute -> vt
+    fit(X, y)    — trains _SupConEncoder via supervised contrastive loss.
+                   All samples of the same class act as mutual positives;
+                   samples of different classes act as negatives.
+    transform(X) — returns [X | ℓ2-normalized embedding] when concat_original=True,
+                   or just the embedding when concat_original=False.
 
-    Output from transform:
-        [X, embedding] if concat_original=True
-        embedding only if concat_original=False
-
-    Modes:
-        - loss_mode="supcon"  (recommended default)
-        - loss_mode="triplet" (exercise-style)
+    Parameters
+    ----------
+    embedding_dim    : int    output embedding size (default 128)
+    hidden_dim       : int    MLP hidden layer width (default 256)
+    temperature      : float  SupCon temperature τ (default 0.07)
+    epochs           : int    training epochs (default 15)
+    batch_size       : int    DataLoader batch size (default 128)
+    lr               : float  Adam learning rate (default 1e-3)
+    weight_decay     : float  Adam weight decay (default 1e-4)
+    balanced_batches : bool   use WeightedRandomSampler for class balance
+    random_state     : int    seeds numpy, torch, and cuda (default 42)
+    device           : str|None  "cpu", "cuda", or None (auto-detect)
+    concat_original  : bool   True → [X | emb], False → emb only
+    verbose          : bool   print per-epoch loss
     """
 
     def __init__(
         self,
         embedding_dim=128,
         hidden_dim=256,
-        loss_mode="supcon",              # "supcon" or "triplet"
-        negative_class="partial",       # for triplet mode: "partial", "amorphous", or 1/0
-        temperature=0.07,               # supcon
-        margin=0.5,                     # triplet
+        temperature=0.07,
         epochs=15,
         batch_size=128,
         lr=1e-3,
         weight_decay=1e-4,
-        n_triplets=4000,
         balanced_batches=True,
-        scale_for_cl=True,
-        concat_original=True,
-        device=None,
         random_state=42,
+        device=None,
+        concat_original=True,
         verbose=False,
     ):
-        self.embedding_dim = embedding_dim
-        self.hidden_dim = hidden_dim
-        self.loss_mode = loss_mode
-        self.negative_class = negative_class
-        self.temperature = temperature
-        self.margin = margin
-        self.epochs = epochs
-        self.batch_size = batch_size
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.n_triplets = n_triplets
+        self.embedding_dim    = embedding_dim
+        self.hidden_dim       = hidden_dim
+        self.temperature      = temperature
+        self.epochs           = epochs
+        self.batch_size       = batch_size
+        self.lr               = lr
+        self.weight_decay     = weight_decay
         self.balanced_batches = balanced_batches
-        self.scale_for_cl = scale_for_cl
-        self.concat_original = concat_original
-        self.device = device
-        self.random_state = random_state
-        self.verbose = verbose
+        self.random_state     = random_state
+        self.device           = device
+        self.concat_original  = concat_original
+        self.verbose          = verbose
 
     def _get_device(self):
         if self.device is not None:
             return torch.device(self.device)
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    def _set_seed(self):
+    def _seed(self):
         np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.random_state)
 
-    def _build_encoder(self, input_dim):
-        return MLPEncoder(
-            in_dim=input_dim,
-            hidden_dim=self.hidden_dim,
-            embedding_dim=self.embedding_dim,
-            dropout=0.2,
-        )
-
     def _supcon_loss(self, z, y):
-        z = F.normalize(z, dim=1)
-        logits = torch.matmul(z, z.T) / self.temperature
+        """
+        Supervised contrastive loss (Khosla et al., 2020).
 
-        n = z.shape[0]
+        For each anchor i, positives are all j ≠ i with y[j] == y[i].
+        Loss = -1/|P(i)| * Σ_{j∈P(i)} log( exp(z_i·z_j/τ) /
+                                             Σ_{k≠i} exp(z_i·z_k/τ) )
+        averaged over anchors that have at least one positive.
+        """
+        z   = F.normalize(z, dim=1)
+        n   = z.shape[0]
         eye = torch.eye(n, dtype=torch.bool, device=z.device)
 
-        logits = logits.masked_fill(eye, -1e9)
-        pos_mask = (y.view(-1, 1) == y.view(1, -1)) & (~eye)
+        logits   = torch.matmul(z, z.T) / self.temperature
+        logits   = logits.masked_fill(eye, -1e9)
 
+        pos_mask  = (y.view(-1, 1) == y.view(1, -1)) & (~eye)
         pos_counts = pos_mask.sum(dim=1)
-        valid = pos_counts > 0
+        valid      = pos_counts > 0
+
         if valid.sum() == 0:
             return None
 
-        log_prob = F.log_softmax(logits, dim=1)
+        log_prob          = F.log_softmax(logits, dim=1)
         mean_log_prob_pos = (pos_mask * log_prob).sum(dim=1) / pos_counts.clamp(min=1)
-        loss = -mean_log_prob_pos[valid].mean()
-        return loss
+        return -mean_log_prob_pos[valid].mean()
 
-    def _make_supcon_loader(self, X, y):
+    def _make_loader(self, X, y):
         X_t = torch.tensor(X, dtype=torch.float32)
         y_t = torch.tensor(y, dtype=torch.long)
-        ds = TensorDataset(X_t, y_t)
+        ds  = TensorDataset(X_t, y_t)
 
-        # Seeded generator for reproducibility
-        generator = torch.Generator()
-        generator.manual_seed(self.random_state)
+        gen = torch.Generator()
+        gen.manual_seed(self.random_state)
 
         if not self.balanced_batches:
             return DataLoader(
@@ -377,213 +348,121 @@ class ContrastiveMITransformer(BaseEstimator, TransformerMixin):
                 batch_size=self.batch_size,
                 shuffle=True,
                 drop_last=False,
-                generator=generator,   # ← add here too
+                generator=gen,
             )
 
         classes, counts = np.unique(y, return_counts=True)
-        class_w = {c: 1.0 / cnt for c, cnt in zip(classes, counts)}
+        class_w  = {c: 1.0 / cnt for c, cnt in zip(classes, counts)}
         sample_w = np.array([class_w[yi] for yi in y], dtype=np.float32)
-        sampler = WeightedRandomSampler(
+        sampler  = WeightedRandomSampler(
             weights=torch.tensor(sample_w, dtype=torch.float32),
             num_samples=len(sample_w),
             replacement=True,
-            generator=generator,      
+            generator=gen,
         )
         return DataLoader(
             ds,
             batch_size=self.batch_size,
             sampler=sampler,
             drop_last=False,
-            generator=generator,       
+            generator=gen,
         )
 
-    def _build_triplets(self, y):
-        y = np.asarray(y).astype(int)
-
-        idx_pos = np.where(y == 2)[0]      # crystalline anchors/positives
-
-        if len(idx_pos) < 2:
-            raise ValueError("Triplet mode needs at least 2 class-2 samples.")
-
-        if self.negative_class in ("partial", 1):
-            idx_neg = np.where(y == 1)[0]
-        elif self.negative_class in ("amorphous", 0):
-            idx_neg = np.where(y == 0)[0]
-        elif self.negative_class in ("rest", "non_crystalline"):
-            idx_neg = np.where(y != 2)[0]
-        elif self.negative_class == "mixed":
-            # Half easy (amorphous, class 0) + half hard (partial, class 1)
-            idx_easy = np.where(y == 0)[0]
-            idx_hard = np.where(y == 1)[0]
-            if len(idx_easy) == 0 or len(idx_hard) == 0:
-                raise ValueError("mixed negative_class requires samples from both class 0 and class 1.")
-            rng = np.random.default_rng(self.random_state)
-            triplets = []
-            n_easy = self.n_triplets // 2
-            n_hard = self.n_triplets - n_easy
-            for _ in range(n_easy):
-                a_idx, p_idx = rng.choice(idx_pos, size=2, replace=False)
-                n_idx = rng.choice(idx_easy)
-                triplets.append((int(a_idx), int(p_idx), int(n_idx)))
-            for _ in range(n_hard):
-                a_idx, p_idx = rng.choice(idx_pos, size=2, replace=False)
-                n_idx = rng.choice(idx_hard)
-                triplets.append((int(a_idx), int(p_idx), int(n_idx)))
-            rng.shuffle(triplets)
-            return triplets
-        else:
-            raise ValueError(
-                "negative_class must be one of: 'partial', 'amorphous', 'rest', 'mixed', 0, 1."
-            )
-
-        if len(idx_neg) == 0:
-            raise ValueError(f"No negatives available for negative_class={self.negative_class!r}.")
-
-        rng = np.random.default_rng(self.random_state)
-        triplets = []
-        for _ in range(self.n_triplets):
-            a_idx, p_idx = rng.choice(idx_pos, size=2, replace=False)
-            n_idx = rng.choice(idx_neg)
-            triplets.append((int(a_idx), int(p_idx), int(n_idx)))
-        return triplets
-
     def fit(self, X, y):
-        self._set_seed()
+        self._seed()
 
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y)
         self.n_features_in_ = X.shape[1]
 
-        if self.scale_for_cl:
-            self.scaler_ = StandardScaler()
-            X_cl = self.scaler_.fit_transform(X).astype(np.float32)
-        else:
-            self.scaler_ = None
-            X_cl = X
+        # Scale features for CL training
+        self.scaler_ = StandardScaler()
+        X_scaled = self.scaler_.fit_transform(X).astype(np.float32)
 
-        self.encoder_ = self._build_encoder(X_cl.shape[1])
+        loader = self._make_loader(X_scaled, y)
+
+        # Model, loss, optimizer, scheduler
         device = self._get_device()
-        self.encoder_.to(device)
+        self.encoder_ = _SupConEncoder(
+            input_dim=X_scaled.shape[1],
+            hidden_dim=self.hidden_dim,
+            embedding_dim=self.embedding_dim,
+        ).to(device)
 
-        opt = optim.Adam(self.encoder_.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+        opt   = optim.Adam(
+            self.encoder_.parameters(),
+            lr=self.lr,
+            weight_decay=self.weight_decay,
+        )
         sched = optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.epochs)
 
         self.loss_history_ = []
 
-        if self.loss_mode == "supcon":
-            loader = self._make_supcon_loader(X_cl, y)
+        for epoch in range(self.epochs):
+            self.encoder_.train()
+            epoch_losses = []
 
-            for epoch in range(self.epochs):
-                self.encoder_.train()
-                losses = []
+            for xb, yb in loader:
+                xb = xb.to(device)
+                yb = yb.to(device)
 
-                for xb, yb in loader:
-                    xb = xb.to(device)
-                    yb = yb.to(device)
+                z    = self.encoder_(xb)
+                loss = self._supcon_loss(z, yb)
 
-                    z = self.encoder_(xb)
-                    loss = self._supcon_loss(z, yb)
-                    if loss is None or not torch.isfinite(loss):
-                        continue
+                if loss is None or not torch.isfinite(loss):
+                    continue
 
-                    opt.zero_grad()
-                    loss.backward()
-                    opt.step()
-                    losses.append(float(loss.item()))
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                epoch_losses.append(float(loss.item()))
 
-                sched.step()
-                epoch_loss = float(np.mean(losses)) if losses else np.nan
-                self.loss_history_.append(epoch_loss)
+            sched.step()   # once per epoch, after all opt.step() calls
 
-                if self.verbose:
-                    print(f"[SupCon] epoch {epoch+1:02d}/{self.epochs}  loss={epoch_loss:.4f}")
+            epoch_loss = float(np.mean(epoch_losses)) if epoch_losses else np.nan
+            self.loss_history_.append(epoch_loss)
 
-        elif self.loss_mode == "triplet":
-            self.triplets_ = self._build_triplets(y)
-            _triplet_gen = torch.Generator()
-            _triplet_gen.manual_seed(self.random_state)
-            loader = DataLoader(
-                _TripletDataset(X_cl, self.triplets_),
-                batch_size=self.batch_size,
-                shuffle=True,
-                drop_last=False,
-                generator=_triplet_gen,
-            )
-            loss_fn = nn.TripletMarginLoss(margin=self.margin, p=2)
-
-            for epoch in range(self.epochs):
-                self.encoder_.train()
-                losses = []
-
-                for a, p, n in loader:
-                    a, p, n = a.to(device), p.to(device), n.to(device)
-
-                    za = F.normalize(self.encoder_(a), dim=1)
-                    zp = F.normalize(self.encoder_(p), dim=1)
-                    zn = F.normalize(self.encoder_(n), dim=1)
-
-                    loss = loss_fn(za, zp, zn)
-                    if not torch.isfinite(loss):
-                        continue
-
-                    opt.zero_grad()
-                    loss.backward()
-                    opt.step()
-                    losses.append(float(loss.item()))
-
-                sched.step()
-                epoch_loss = float(np.mean(losses)) if losses else np.nan
-                self.loss_history_.append(epoch_loss)
-
-                if self.verbose:
-                    print(f"[Triplet] epoch {epoch+1:02d}/{self.epochs}  loss={epoch_loss:.4f}")
-
-        else:
-            raise ValueError("loss_mode must be 'supcon' or 'triplet'.")
+            if self.verbose:
+                print(f"[SupConTrainer] epoch {epoch+1:02d}/{self.epochs}  "
+                      f"loss={epoch_loss:.4f}")
 
         self.encoder_.cpu()
         self.encoder_.eval()
         return self
 
     def _embed(self, X):
-        X = np.asarray(X, dtype=np.float32)
-
-        if self.scaler_ is not None:
-            X_cl = self.scaler_.transform(X).astype(np.float32)
-        else:
-            X_cl = X
+        X_scaled = self.scaler_.transform(
+            np.asarray(X, dtype=np.float32)
+        ).astype(np.float32)
 
         self.encoder_.eval()
-        Xt = torch.tensor(X_cl, dtype=torch.float32)
-
+        Xt  = torch.tensor(X_scaled, dtype=torch.float32)
         out = []
         with torch.no_grad():
             for i in range(0, len(Xt), 256):
-                z = self.encoder_(Xt[i:i+256])
+                z = self.encoder_(Xt[i:i + 256])
                 z = F.normalize(z, dim=1)
                 out.append(z.cpu().numpy())
-
         return np.vstack(out)
 
     def transform(self, X):
         check_is_fitted(self, ["encoder_", "n_features_in_"])
-        X = np.asarray(X, dtype=np.float32)
+        X   = np.asarray(X, dtype=np.float32)
         emb = self._embed(X)
-
-        # IMPORTANT:
-        # return the ORIGINAL incoming pipeline X plus learned embedding,
-        # not the internally scaled CL matrix.
         if self.concat_original:
             return np.hstack([X, emb])
         return emb
 
 
+# ─────────────────────────────────────────────────────────────
+# 4.  AdaptiveSelectKBest
+# ─────────────────────────────────────────────────────────────
 class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
     """
     SelectKBest that:
       - caps k at the number of available columns
-      - optionally appends continuous CL embedding columns to the mask
-      - can accept a mixed discrete/continuous mask for the original features
+      - marks CL embedding columns as continuous (discrete_features=False)
+        so MI scores them correctly
     """
 
     def __init__(
@@ -607,14 +486,16 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
             mask = np.asarray(self.base_discrete_mask, dtype=bool)
             if len(mask) != n_features:
                 raise ValueError(
-                    f"base_discrete_mask has length {len(mask)} but X has {n_features} features."
+                    f"base_discrete_mask has length {len(mask)} "
+                    f"but X has {n_features} features."
                 )
             return mask
 
         n_orig = n_features - self.embedding_dim
         if n_orig <= 0:
             raise ValueError(
-                f"Expected at least {self.embedding_dim + 1} features, got {n_features}."
+                f"Expected at least {self.embedding_dim + 1} features, "
+                f"got {n_features}."
             )
 
         if self.base_discrete_mask is None:
@@ -623,15 +504,17 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
             base_mask = np.asarray(self.base_discrete_mask, dtype=bool)
             if len(base_mask) != n_orig:
                 raise ValueError(
-                    f"base_discrete_mask has length {len(base_mask)} but original block has {n_orig}."
+                    f"base_discrete_mask has length {len(base_mask)} "
+                    f"but original block has {n_orig}."
                 )
 
+        # CL embedding columns are continuous
         return np.r_[base_mask, np.zeros(self.embedding_dim, dtype=bool)]
 
     def fit(self, X, y):
         X = np.asarray(X)
         k_use = min(self.k, X.shape[1])
-        disc = self._disc_mask(X.shape[1])
+        disc  = self._disc_mask(X.shape[1])
 
         self.selector_ = SelectKBest(
             score_func=lambda Xin, yin: mutual_info_classif(
@@ -654,118 +537,36 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
         return self.selector_.get_support(indices=indices)
 
 
-def balanced_sample_weights(y):
-    classes, counts = np.unique(y, return_counts=True)
-    w = {c: len(y) / (len(classes) * n) for c, n in zip(classes, counts)}
-    return np.array([w[yi] for yi in y])
-
-
-def make_cl_transformer():
-    return ContrastiveMITransformer(
-        embedding_dim=128,
-        hidden_dim=512,
-        epochs=15,
-        lr=1e-4,
-        weight_decay=1e-4,
-        batch_size=128,
-        margin=0.5,
-        n_triplets=4000,
-        negative_class="partial",   # hard negatives
-        concat_original=True,
-        scale_for_cl=True,
-        random_state=42,
-        verbose=False,
-    )
-
-
-# -----------------------------
-# Shared feature pipeline
-# Order:
-# impute -> vt -> [cl] -> mi -> smote -> ordinal model
-# -----------------------------
-def make_feature_steps(with_cl=False):
-    steps = [
-        ("impute", SimpleImputer(strategy="median")),
-        ("vt", VarianceThreshold(threshold=0.0)),
-    ]
-
-    if with_cl:
-        steps.append((
-            "cl",
-            ContrastiveMITransformer(
-                embedding_dim=128,
-                hidden_dim=512,
-                epochs=15,
-                lr=1e-4,
-                weight_decay=1e-4,
-                batch_size=128,
-                margin=0.5,
-                n_triplets=4000,
-                negative_class="partial",   # hard negatives
-                concat_original=True,
-                scale_for_cl=True,
-                random_state=42,
-                verbose=False,
-            )
-        ))
-
-    steps.append((
-        "mi",
-        SafeMISelectKBest(
-            k=5500,
-            with_cl=with_cl,
-            embedding_dim=128,
-            random_state=42,
-        )
-    ))
-
-    steps.append((
-        "smote",
-        SMOTE(sampling_strategy={1: 180, 2: 250}, k_neighbors=5, random_state=42)
-    ))
-
-    return steps
-
-
 # ─────────────────────────────────────────────────────────────
-# Pipeline step builders
+# 5.  Pipeline step builders
 # ─────────────────────────────────────────────────────────────
 def _base_steps(with_cl: bool) -> list:
     """
-    Common prefix:
-        impute -> vt -> [cl] -> mi -> smote
+    Common feature prefix:
+        impute -> vt -> [SupCon CL] -> mi -> pca -> smote
 
-    Default CL = supervised contrastive over all 3 classes.
-    To match the exercise exactly, switch to:
-        loss_mode="triplet", negative_class="amorphous"  # easy
-    or:
-        loss_mode="triplet", negative_class="partial"    # hard
+    When with_cl=True the SupConTrainer appends a 128-d embedding to the
+    VT-filtered features before MI selection.
     """
     steps = [
         ("impute", SimpleImputer(strategy="median")),
-        ("vt", VarianceThreshold(threshold=0.0)),
+        ("vt",     VarianceThreshold(threshold=0.0)),
     ]
 
     if with_cl:
         steps.append((
             "cl",
-            ContrastiveMITransformer(
+            SupConTrainer(
                 embedding_dim=CL_EMB_DIM,
                 hidden_dim=256,
-                loss_mode="supcon",          # recommended default
-                negative_class="partial",    # used only in triplet mode
                 temperature=0.07,
-                margin=0.5,
-                epochs=15,                   # keep modest: this runs inside CV
+                epochs=15,
                 batch_size=128,
                 lr=1e-3,
                 weight_decay=1e-4,
-                n_triplets=4000,
                 balanced_batches=True,
-                scale_for_cl=True,
-                concat_original=True,
-                device=None,
                 random_state=42,
+                concat_original=True,   # [original features | embedding]
                 verbose=False,
             )
         ))
@@ -795,74 +596,28 @@ def _base_steps(with_cl: bool) -> list:
 
 def _cl_only_steps() -> list:
     """
-    CL-only pipeline:
-        impute -> vt -> cl(embedding only) -> smote
+    CL-only feature pipeline:
+        impute -> vt -> SupCon CL (embedding only) -> smote
+
+    No MI selection: the downstream classifier operates purely on the
+    128-d SupCon embedding space.
     """
     return [
         ("impute", SimpleImputer(strategy="median")),
-        ("vt", VarianceThreshold(threshold=0.0)),
+        ("vt",     VarianceThreshold(threshold=0.0)),
         (
             "cl",
-            ContrastiveMITransformer(
+            SupConTrainer(
                 embedding_dim=CL_EMB_DIM,
                 hidden_dim=256,
-                loss_mode="supcon",
-                negative_class="partial",   # used only in triplet mode
                 temperature=0.07,
-                margin=0.5,
                 epochs=15,
                 batch_size=128,
                 lr=1e-3,
                 weight_decay=1e-4,
-                n_triplets=4000,
                 balanced_batches=True,
-                scale_for_cl=True,
-                concat_original=False,      # <<< CL-only: no raw features
-                device=None,
                 random_state=42,
-                verbose=False,
-            ),
-        ),
-        (
-            "smote",
-            SMOTE(
-                sampling_strategy=SMOTE_STRATEGY,
-                k_neighbors=5,
-                random_state=42,
-            ),
-        ),
-    ]
-
-
-def _cl_only_steps_triplet() -> list:
-    """
-    Triplet CL-only pipeline:
-        impute -> vt -> cl(triplet, mixed negatives, embedding only) -> smote
-
-    anchor   = crystalline (class 2)
-    positive = crystalline (class 2)
-    negative = 50 % amorphous (easy, class 0) + 50 % partial (hard, class 1)
-    """
-    return [
-        ("impute", SimpleImputer(strategy="median")),
-        ("vt", VarianceThreshold(threshold=0.0)),
-        (
-            "cl",
-            ContrastiveMITransformer(
-                embedding_dim=CL_EMB_DIM,
-                hidden_dim=256,
-                loss_mode="triplet",
-                negative_class="mixed",      # easy (amorphous) + hard (partial)
-                margin=0.5,
-                epochs=15,
-                batch_size=128,
-                lr=1e-3,
-                weight_decay=1e-4,
-                n_triplets=4000,
-                scale_for_cl=True,
-                concat_original=False,       # CL-only: no raw features
-                device=None,
-                random_state=42,
+                concat_original=False,   # embedding only
                 verbose=False,
             ),
         ),
@@ -878,7 +633,7 @@ def _cl_only_steps_triplet() -> list:
 
 
 # ─────────────────────────────────────────────────────────────
-# Pipeline factories
+# 6.  Pipeline factories
 # ─────────────────────────────────────────────────────────────
 def make_rf_pipe(rf_params, with_cl=False):
     return ImbPipeline(
@@ -948,34 +703,131 @@ def make_xgb_pipe_cl_only(xgb_params):
     )
 
 
-def make_rf_pipe_cl_only_triplet(rf_params):
+# ─────────────────────────────────────────────────────────────
+# 7.  Regression pipeline factories (for BO surrogate)
+# ─────────────────────────────────────────────────────────────
+def _base_steps_regression(with_cl: bool) -> list:
+    """Feature prefix for regression: impute → vt → [cl] → mi.  No SMOTE."""
+    steps = [
+        ("impute", SimpleImputer(strategy="median")),
+        ("vt",     VarianceThreshold(threshold=0.0)),
+    ]
+    if with_cl:
+        steps.append((
+            "cl",
+            SupConTrainer(
+                embedding_dim=CL_EMB_DIM,
+                hidden_dim=256,
+                temperature=0.07,
+                epochs=15,
+                batch_size=128,
+                lr=1e-3,
+                weight_decay=1e-4,
+                balanced_batches=True,
+                random_state=42,
+                concat_original=True,
+                verbose=False,
+            )
+        ))
+    steps.append((
+        "mi",
+        AdaptiveSelectKBest(
+            k=MI_K,
+            with_cl=with_cl,
+            embedding_dim=CL_EMB_DIM,
+            base_discrete_mask=ORIGINAL_DISCRETE_MASK,
+            random_state=42,
+        ),
+    ))
+    return steps
+
+
+def make_rf_regressor_pipe(rf_params, with_cl=False):
+    """RF regressor pipeline for BO surrogate (no SMOTE, no ordinal wrapper)."""
     return ImbPipeline(
-        steps=_cl_only_steps_triplet() + [
+        steps=_base_steps_regression(with_cl=with_cl) + [
             (
-                "ordinal_rf",
-                FrankHallOrdinalClassifier(
-                    base_estimator=RandomForestClassifier(
-                        **rf_params,
-                        bootstrap=True,
-                        n_jobs=-1,
-                        random_state=RANDOM_STATE,
-                    )
+                "rf_reg",
+                RandomForestRegressor(
+                    **rf_params,
+                    bootstrap=True,
+                    n_jobs=-1,
+                    random_state=RANDOM_STATE,
                 ),
             )
         ]
     )
 
 
-def make_xgb_pipe_cl_only_triplet(xgb_params):
+def make_xgb_regressor_pipe(xgb_params, with_cl=False):
+    """XGBoost regressor pipeline for BO surrogate (no SMOTE, no ordinal wrapper)."""
+    xgb_reg_fixed = {k: v for k, v in XGB_FIXED.items() if k != "eval_metric"}
+    xgb_reg_fixed["eval_metric"] = "rmse"
     return ImbPipeline(
-        steps=_cl_only_steps_triplet() + [
+        steps=_base_steps_regression(with_cl=with_cl) + [
             (
-                "ordinal_xgb",
-                FrankHallOrdinalClassifier(
-                    base_estimator=XGBClassifier(
-                        **xgb_params,
-                        **XGB_FIXED,
-                    )
+                "xgb_reg",
+                XGBRegressor(
+                    **xgb_params,
+                    **xgb_reg_fixed,
+                ),
+            )
+        ]
+    )
+
+
+def _cl_only_steps_regression() -> list:
+    """CL-only feature pipeline for regression: impute → vt → CL (embedding only). No MI, no SMOTE."""
+    return [
+        ("impute", SimpleImputer(strategy="median")),
+        ("vt",     VarianceThreshold(threshold=0.0)),
+        (
+            "cl",
+            SupConTrainer(
+                embedding_dim=CL_EMB_DIM,
+                hidden_dim=256,
+                temperature=0.07,
+                epochs=15,
+                batch_size=128,
+                lr=1e-3,
+                weight_decay=1e-4,
+                balanced_batches=True,
+                random_state=42,
+                concat_original=False,   # embedding only
+                verbose=False,
+            ),
+        ),
+    ]
+
+
+def make_rf_regressor_pipe_cl_only(rf_params):
+    """RF regressor on CL-only embedding (no MI, no SMOTE)."""
+    return ImbPipeline(
+        steps=_cl_only_steps_regression() + [
+            (
+                "rf_reg",
+                RandomForestRegressor(
+                    **rf_params,
+                    bootstrap=True,
+                    n_jobs=-1,
+                    random_state=RANDOM_STATE,
+                ),
+            )
+        ]
+    )
+
+
+def make_xgb_regressor_pipe_cl_only(xgb_params):
+    """XGBoost regressor on CL-only embedding (no MI, no SMOTE)."""
+    xgb_reg_fixed = {k: v for k, v in XGB_FIXED.items() if k != "eval_metric"}
+    xgb_reg_fixed["eval_metric"] = "rmse"
+    return ImbPipeline(
+        steps=_cl_only_steps_regression() + [
+            (
+                "xgb_reg",
+                XGBRegressor(
+                    **xgb_params,
+                    **xgb_reg_fixed,
                 ),
             )
         ]

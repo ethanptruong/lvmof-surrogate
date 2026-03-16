@@ -10,7 +10,8 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import shap
 from sklearn.base import clone
-from sklearn.model_selection import (cross_val_predict, learning_curve)
+from sklearn.model_selection import (cross_val_predict, learning_curve,
+                                     StratifiedGroupKFold)
 from sklearn.metrics import (
     roc_curve, roc_auc_score,
     precision_recall_curve, average_precision_score,
@@ -18,6 +19,15 @@ from sklearn.metrics import (
 )
 
 from models import scoring_ordinal
+
+
+def _partition_cv(cv):
+    """Return a single-repeat StratifiedGroupKFold for use with cross_val_predict.
+    cross_val_predict requires partitions; repeated CV violates this."""
+    n_splits = getattr(cv, "n_splits", 5)
+    random_state = getattr(cv, "random_state", 42)
+    return StratifiedGroupKFold(n_splits=n_splits, shuffle=True,
+                                random_state=random_state)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -48,7 +58,7 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
         proba = cross_val_predict(
             pipe,
             X, y,
-            cv=cv,
+            cv=_partition_cv(cv),
             groups=groups,
             method="predict_proba",
             n_jobs=n_jobs_cvpred,
@@ -187,7 +197,10 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
         res = compute_learning_curve(name, pipe, n_jobs_lc)
         learning_curve_results.append(res)
 
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    n_pipes = len(learning_curve_results)
+    n_cols = 2
+    n_rows = (n_pipes + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, 6 * n_rows))
     axes = axes.ravel()
 
     for ax, res in zip(axes, learning_curve_results):
@@ -206,6 +219,9 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
         ax.set_ylabel(LC_SCORE_NAME)
         ax.grid(alpha=0.25)
         ax.legend(fontsize=9)
+
+    for ax in axes[n_pipes:]:
+        ax.set_visible(False)
 
     plt.tight_layout()
     plt.savefig("learning_curves_qwk.png", dpi=180, bbox_inches="tight")
@@ -279,7 +295,7 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
         y_pred = cross_val_predict(
             pipe,
             X, y,
-            cv=cv,
+            cv=_partition_cv(cv),
             groups=groups,
             method="predict",
             n_jobs=n_jobs_cvpred,
@@ -287,7 +303,11 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
         )
         oof_preds[name] = y_pred
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    n_pipes = len(pipelines)
+    n_cols = 2
+    n_rows = (n_pipes + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 6 * n_rows))
     axes = axes.ravel()
 
     for ax, (name, _, _) in zip(axes, pipelines):
@@ -296,12 +316,15 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
         disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format="d")
         ax.set_title(f"{name}\nCounts")
 
+    for ax in axes[n_pipes:]:
+        ax.set_visible(False)
+
     plt.tight_layout()
     plt.savefig("confusion_matrices_counts.png", dpi=180, bbox_inches="tight")
     plt.show()
     print("Saved: confusion_matrices_counts.png")
 
-    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 6 * n_rows))
     axes = axes.ravel()
 
     for ax, (name, _, _) in zip(axes, pipelines):
@@ -309,6 +332,9 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
         disp = ConfusionMatrixDisplay(confusion_matrix=cm_norm, display_labels=CLASS_LABELS)
         disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format=".2f")
         ax.set_title(f"{name}\nNormalized by true class")
+
+    for ax in axes[n_pipes:]:
+        ax.set_visible(False)
 
     plt.tight_layout()
     plt.savefig("confusion_matrices_normalized.png", dpi=180, bbox_inches="tight")
@@ -352,15 +378,15 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
 # ─────────────────────────────────────────────────────────────
 # run_shap_analysis
 # ─────────────────────────────────────────────────────────────
-def run_shap_analysis(xgb_pipes, X, y) -> None:
+def run_shap_analysis(pipes, X, y) -> None:
     """
-    Run SHAP analysis for XGBoost pipelines.
+    Run SHAP analysis for tree-based pipelines (XGBoost or RandomForest).
 
     Parameters
     ----------
-    xgb_pipes : list of (label, pipe)  — only XGB pipelines
-    X         : np.ndarray
-    y         : np.ndarray
+    pipes : list of (label, pipe)
+    X     : np.ndarray
+    y     : np.ndarray
     """
 
     def fit_full_pipeline(pipe, X, y):
@@ -372,12 +398,12 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
         """
         Preferred for SHAP:
         transform through all steps up to but NOT including SMOTE and final model.
-        This gives the actual feature space seen by the XGB model at inference time.
+        This gives the actual feature space seen by the model at inference time.
         """
         Xt = X
         used_steps = []
         for name, step in pipe_fitted.steps:
-            if name in ("smote", "ordinal_xgb"):
+            if name in ("smote", "ordinal_xgb", "ordinal_rf"):
                 break
             Xt = step.transform(Xt)
             used_steps.append(name)
@@ -406,29 +432,48 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
 
     all_summary_rows = []
 
-    print("\n─── SHAP analysis for XGBoost pipelines ─────────────────────────")
+    print("\n─── SHAP analysis for tree pipelines ────────────────────────────")
 
-    for pipe_label, pipe in xgb_pipes:
+    _BAR_COLORS = {
+        "XGB | MI only":          "tab:blue",
+        "XGB | CL + MI":          "tab:orange",
+        "XGB | CL only (supcon)": "tab:purple",
+        "RF  | MI only":          "tab:cyan",
+        "RF  | CL + MI":          "tab:olive",
+        "RF  | CL only (supcon)": "tab:pink",
+    }
+    _AGG_COLORS = {
+        "XGB | MI only":          "tab:green",
+        "XGB | CL + MI":          "tab:red",
+        "XGB | CL only (supcon)": "tab:brown",
+        "RF  | MI only":          "tab:teal",
+        "RF  | CL + MI":          "tab:lime",
+        "RF  | CL only (supcon)": "tab:pink",
+    }
+
+    for pipe_label, pipe in pipes:
         print(f"\nFitting full pipeline for SHAP: {pipe_label}")
+        pipe_slug = pipe_label.replace(" ", "_").replace("|", "-").replace("/", "-")
         fitted_pipe = fit_full_pipeline(pipe, X, y)
 
         # Transform through impute -> vt -> [cl] -> mi
         X_model, used_steps = transform_until_before_smote(fitted_pipe, X)
         feature_names = get_feature_names_generic(X_model.shape[1],
-                                                   prefix=f"{pipe_label.lower()}_feat")
+                                                   prefix=f"{pipe_slug.lower()}_feat")
 
-        print(f"  Feature space entering XGB: {X_model.shape}")
+        print(f"  Feature space entering model: {X_model.shape}")
         print(f"  Steps used before model: {used_steps}")
 
-        ordinal_step = fitted_pipe.named_steps["ordinal_xgb"]
+        ordinal_key = "ordinal_xgb" if "ordinal_xgb" in fitted_pipe.named_steps else "ordinal_rf"
+        ordinal_step = fitted_pipe.named_steps[ordinal_key]
         classifiers = ordinal_step.classifiers_   # dict: threshold -> fitted binary estimator
 
         threshold_importances = []
 
-        for threshold, xgb_model in classifiers.items():
+        for threshold, base_model in classifiers.items():
             print(f"  Explaining Frank-Hall binary model for threshold k={threshold}")
 
-            explainer = shap.TreeExplainer(xgb_model)
+            explainer = shap.TreeExplainer(base_model)
             shap_values = explainer.shap_values(X_model)
 
             shap_values = np.asarray(shap_values)
@@ -447,17 +492,17 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
             threshold_importances.append(df_imp)
             all_summary_rows.append(df_imp)
 
-            csv_name = f"shap_importance_{pipe_label}_threshold_{threshold}.csv"
+            csv_name = f"shap_importance_{pipe_slug}_threshold_{threshold}.csv"
             df_imp.to_csv(csv_name, index=False)
             print(f"Saved: {csv_name}")
 
             top25 = df_imp.head(25)
-            plot_name = f"shap_bar_{pipe_label}_threshold_{threshold}.png"
+            plot_name = f"shap_bar_{pipe_slug}_threshold_{threshold}.png"
             save_barplot(
                 top25,
                 title=f"{pipe_label} — Mean |SHAP| (threshold k={threshold})",
                 filename=plot_name,
-                color="tab:blue" if pipe_label == "XGB_MI_only" else "tab:orange",
+                color=_BAR_COLORS.get(pipe_label, "tab:gray"),
             )
 
             try:
@@ -469,7 +514,7 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
                     show=False
                 )
                 plt.title(f"{pipe_label} — SHAP beeswarm (threshold k={threshold})")
-                beeswarm_name = f"shap_beeswarm_{pipe_label}_threshold_{threshold}.png"
+                beeswarm_name = f"shap_beeswarm_{pipe_slug}_threshold_{threshold}.png"
                 plt.tight_layout()
                 plt.savefig(beeswarm_name, dpi=180, bbox_inches="tight")
                 plt.show()
@@ -485,17 +530,17 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
                   .rename(columns={"mean_abs_shap": "mean_abs_shap_avg_over_thresholds"})
         )
 
-        agg_csv = f"shap_importance_{pipe_label}_aggregated.csv"
+        agg_csv = f"shap_importance_{pipe_slug}_aggregated.csv"
         df_agg.to_csv(agg_csv, index=False)
         print(f"Saved: {agg_csv}")
 
         top25_agg = df_agg.head(25)
-        agg_plot = f"shap_bar_{pipe_label}_aggregated.png"
+        agg_plot = f"shap_bar_{pipe_slug}_aggregated.png"
         save_barplot(
             top25_agg.rename(columns={"mean_abs_shap_avg_over_thresholds": "mean_abs_shap"}),
             title=f"{pipe_label} — Aggregated Mean |SHAP| Across Frank-Hall Thresholds",
             filename=agg_plot,
-            color="tab:green" if pipe_label == "XGB_MI_only" else "tab:red",
+            color=_AGG_COLORS.get(pipe_label, "tab:gray"),
         )
 
     print("\n─── Combined SHAP comparison ────────────────────────────────────")
@@ -521,26 +566,33 @@ def run_shap_analysis(xgb_pipes, X, y) -> None:
 
     pivot_df = pivot_df.loc[pivot_df.max(axis=1).sort_values().index]
 
+    cols = list(pivot_df.columns)
+    n_cols = len(cols)
+    total_width = 0.8
+    bar_h = total_width / n_cols
+    offsets = np.linspace(-(total_width - bar_h) / 2,
+                          (total_width - bar_h) / 2, n_cols)
+    _palette = list(_BAR_COLORS.values()) + [
+        "tab:gray", "tab:olive", "tab:cyan", "tab:pink"
+    ]
+
     plt.figure(figsize=(10, max(6, 0.35 * len(pivot_df))))
     x = np.arange(len(pivot_df))
-    width = 0.38
-
-    cols = list(pivot_df.columns)
-    plt.barh(x - width/2, pivot_df[cols[0]], height=width, label=cols[0], color="tab:blue")
-    if len(cols) > 1:
-        plt.barh(x + width/2, pivot_df[cols[1]], height=width, label=cols[1], color="tab:orange")
+    for i, col in enumerate(cols):
+        color = _BAR_COLORS.get(col, _palette[i % len(_palette)])
+        plt.barh(x + offsets[i], pivot_df[col], height=bar_h, label=col, color=color)
 
     plt.yticks(x, pivot_df.index)
     plt.xlabel("Mean |SHAP| averaged over ordinal thresholds")
-    plt.title("Top SHAP Features: XGB MI vs XGB CL+MI")
-    plt.legend()
+    plt.title("Top SHAP Features — Pipeline Comparison")
+    plt.legend(fontsize=8)
     plt.tight_layout()
-    plt.savefig("shap_xgb_pipeline_comparison.png", dpi=180, bbox_inches="tight")
+    plt.savefig("shap_pipeline_comparison.png", dpi=180, bbox_inches="tight")
     plt.show()
-    print("Saved: shap_xgb_pipeline_comparison.png")
+    print("Saved: shap_pipeline_comparison.png")
 
-    pivot_df.reset_index().to_csv("shap_xgb_pipeline_comparison.csv", index=False)
-    print("Saved: shap_xgb_pipeline_comparison.csv")
+    pivot_df.reset_index().to_csv("shap_pipeline_comparison.csv", index=False)
+    print("Saved: shap_pipeline_comparison.csv")
 
 
 # -----------------------------------------------------------------------------
@@ -669,19 +721,29 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
     print(f"  SHAP  >>  {pipe_label}")
     print(f"{'='*70}")
 
+    # Sanitize label for filenames (remove chars invalid on Windows)
+    import re
+    safe_label = re.sub(r'[|<>:"/\\?*]', '_', pipe_label).strip()
+
     fitted = clone(pipe)
     fitted.fit(X, y)
 
     X_model, feat_names, feat_grps = transform_with_names(
         fitted, X, X_names, X_groups, label=pipe_label)
 
-    ordinal_step = fitted.named_steps["ordinal_xgb"]
+    # Support both XGB and RF ordinal pipelines
+    for step_name in ("ordinal_xgb", "ordinal_rf"):
+        if step_name in fitted.named_steps:
+            ordinal_step = fitted.named_steps[step_name]
+            break
+    else:
+        raise KeyError("No ordinal step found (expected 'ordinal_xgb' or 'ordinal_rf')")
     classifiers  = ordinal_step.classifiers_
 
     thresh_abs = {}
     shap_stack = []
-    for thresh, xgb_model in classifiers.items():
-        explainer = shap.TreeExplainer(xgb_model)
+    for thresh, tree_model in classifiers.items():
+        explainer = shap.TreeExplainer(tree_model)
         sv = np.asarray(explainer.shap_values(X_model))
         if sv.ndim == 3:
             sv = sv[..., -1]
@@ -697,8 +759,8 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
         "mean_abs_shap": mean_abs_shap,
     }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
 
-    df_imp.to_csv(f"shap_named_{pipe_label}.csv", index=False)
-    print(f"  Saved: shap_named_{pipe_label}.csv")
+    df_imp.to_csv(f"shap_named_{safe_label}.csv", index=False)
+    print(f"  Saved: shap_named_{safe_label}.csv")
 
     # ── Plot 1 -- Feature-group bar chart (SUM) ───────────────────────────
     # Total group importance -- larger groups will naturally score higher.
@@ -725,15 +787,15 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
         fontsize=12, fontweight="bold")
     ax1.spines[["top","right"]].set_visible(False)
     plt.tight_layout()
-    fig1.savefig(f"shap_group_{pipe_label}.png", dpi=180, bbox_inches="tight")
+    fig1.savefig(f"shap_group_{safe_label}.png", dpi=180, bbox_inches="tight")
     plt.show()
-    print(f"  Saved: shap_group_{pipe_label}.png")
+    print(f"  Saved: shap_group_{safe_label}.png")
 
     df_grp.sort_values(ascending=False).reset_index().rename(
         columns={"mean_abs_shap": "sum_mean_abs_shap"}).assign(
         n_features=lambda d: d["group"].map(df_grp_cnt)).to_csv(
-        f"shap_group_{pipe_label}.csv", index=False)
-    print(f"  Saved: shap_group_{pipe_label}.csv")
+        f"shap_group_{safe_label}.csv", index=False)
+    print(f"  Saved: shap_group_{safe_label}.csv")
 
     # ── Plot 1b -- Feature-group bar chart (MEAN, size-normalised) ────────
     # Divides each group's total SHAP by the number of features in that group.
@@ -762,15 +824,15 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
         fontsize=12, fontweight="bold")
     ax1b.spines[["top","right"]].set_visible(False)
     plt.tight_layout()
-    fig1b.savefig(f"shap_group_avg_{pipe_label}.png", dpi=180, bbox_inches="tight")
+    fig1b.savefig(f"shap_group_avg_{safe_label}.png", dpi=180, bbox_inches="tight")
     plt.show()
-    print(f"  Saved: shap_group_avg_{pipe_label}.png")
+    print(f"  Saved: shap_group_avg_{safe_label}.png")
 
     df_grp_avg.sort_values(ascending=False).reset_index().rename(
         columns={"mean_abs_shap": "mean_per_feature_shap"}).assign(
         n_features=lambda d: d["group"].map(df_grp_cnt)).to_csv(
-        f"shap_group_avg_{pipe_label}.csv", index=False)
-    print(f"  Saved: shap_group_avg_{pipe_label}.csv")
+        f"shap_group_avg_{safe_label}.csv", index=False)
+    print(f"  Saved: shap_group_avg_{safe_label}.csv")
 
     # ── Plot 2 -- Top-N individual features (bar, colour = category) ──────
     top_df  = df_imp.head(top_n).iloc[::-1]
@@ -790,9 +852,9 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
         fontsize=12, fontweight="bold")
     ax2.spines[["top","right"]].set_visible(False)
     plt.tight_layout()
-    fig2.savefig(f"shap_top{top_n}_{pipe_label}.png", dpi=180, bbox_inches="tight")
+    fig2.savefig(f"shap_top{top_n}_{safe_label}.png", dpi=180, bbox_inches="tight")
     plt.show()
-    print(f"  Saved: shap_top{top_n}_{pipe_label}.png")
+    print(f"  Saved: shap_top{top_n}_{safe_label}.png")
 
     # ── Plot 3 -- SHAP beeswarm (signed, top-N, avg over thresholds) ──────
     top_feat_set = set(df_imp["feature"].iloc[:top_n])
@@ -816,10 +878,10 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
             "positive SHAP => pushes toward Crystalline",
             fontsize=9, fontweight="bold")
         plt.tight_layout()
-        plt.savefig(f"shap_beeswarm_{pipe_label}.png",
+        plt.savefig(f"shap_beeswarm_{safe_label}.png",
                     dpi=180, bbox_inches="tight")
         plt.show()
-        print(f"  Saved: shap_beeswarm_{pipe_label}.png")
+        print(f"  Saved: shap_beeswarm_{safe_label}.png")
     except Exception as _e:
         plt.close("all")
         print(f"  Beeswarm skipped: {_e}")

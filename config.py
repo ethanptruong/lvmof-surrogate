@@ -84,7 +84,9 @@ PROCESS_COLS = [
     'Mix_M_HB_Don',
     'temperature_k',
     'metal_over_linker_ratio',
-    'reaction_hours'
+    'reaction_hours',
+    'reaction_hours_missing',
+    'temperature_k_missing',
 ]
 
 # ── Model / training constants ────────────────────────────────────────────────
@@ -350,3 +352,31 @@ _SMARTS_RAW = {
 _COORD_KEYS = ["COOH", "COO_neg", "py_N", "amine_prim",
                "amine_sec", "hydroxyl", "imidazole", "tetrazole",
                "phosphonate", "sulfonate"]
+
+# ── Bayesian Optimization ────────────────────────────────────────────────────
+BO_DEFAULT_ACQUISITION = "bore"
+BO_BORE_GAMMA          = 0.25
+BO_LCB_KAPPA           = 2.0
+BO_EI_XI               = 0.01
+BO_N_ITERATIONS        = 50
+BO_BATCH_SIZE          = 3
+BO_INIT_FRACTION       = 0.40
+BO_CHECKPOINT_DIR      = "checkpoints/bo"
+BO_EPSILON_GREEDY      = 0.1
+BO_N_LHS_SAMPLES       = 1000
+BO_DEFAULT_SURROGATE   = "rf_cl_mi"
+BO_BOOTSTRAP_M         = 10
+
+# Controllable process parameters for BO
+# (total_conc bounds computed at runtime from 5th-95th percentile of training data)
+BO_CONTROLLABLE_PARAMS = {
+    "equivalents":           (0.0, 150.0),
+    "temperature_k":         (298.0, 393.0),
+    "total_conc":            None,   # computed at runtime via percentile clipping
+}
+# Optional param, off by default — enable via --bo-include-mlr
+BO_OPTIONAL_PARAMS = {
+    "metal_over_linker_ratio": (0.0, 4.0),
+}
+BO_TOTAL_CONC_CLIP_PERCENTILES = (5, 95)
+BO_LOG_SCALE_PARAMS            = ["total_conc"]

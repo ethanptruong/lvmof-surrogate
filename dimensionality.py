@@ -3,18 +3,15 @@ dimensionality.py
 Dimensionality reduction, KMeans grouping, MI diagnostic,
 process variable interaction building, and CV matrix assembly.
 
-Group assignment uses PCA (50 components) + KMeans instead of UMAP for
-cross-platform reproducibility. UMAP's approximate nearest-neighbor graph
-gives different embeddings on Windows vs Linux even with the same
-random_state, shifting CV groups and QWK by ±10-15 points.
+Group assignment uses UMAP (2D) + KMeans on the MI-filtered feature view.
 """
 
 import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import umap
 from sklearn.cluster import KMeans
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, MinMaxScaler
 from sklearn.feature_selection import (VarianceThreshold, SelectKBest,
                                        mutual_info_classif)
@@ -28,6 +25,39 @@ warnings.filterwarnings(
     message="Clustering metrics expects discrete values",
     category=UserWarning,
 )
+
+
+# ─────────────────────────────────────────────────────────────
+# RepeatedStratifiedGroupKFold
+# ─────────────────────────────────────────────────────────────
+class RepeatedStratifiedGroupKFold:
+    """
+    Drop-in CV splitter that repeats StratifiedGroupKFold with different
+    shuffle seeds.  Implements the sklearn CV interface (split / get_n_splits)
+    so it works everywhere a StratifiedGroupKFold object does.
+
+    Parameters
+    ----------
+    n_splits   : folds per repeat
+    n_repeats  : number of independent shuffles
+    random_state : base seed; repeat r uses seed = random_state + r
+    """
+
+    def __init__(self, n_splits=3, n_repeats=1, random_state=42):
+        self.n_splits = n_splits
+        self.n_repeats = n_repeats
+        self.random_state = random_state
+
+    def split(self, X, y=None, groups=None):
+        for r in range(self.n_repeats):
+            cv = StratifiedGroupKFold(
+                n_splits=self.n_splits, shuffle=True,
+                random_state=self.random_state + r,
+            )
+            yield from cv.split(X, y, groups)
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits * self.n_repeats
 
 
 # ─────────────────────────────────────────────────────────────
@@ -184,49 +214,69 @@ def assemble_cv_matrix(X_vt, Xprocnorm, interactions) -> np.ndarray:
 
 
 # ─────────────────────────────────────────────────────────────
-# build_pca_embedding
+# remove_correlated_features
 # ─────────────────────────────────────────────────────────────
-def build_pca_embedding(X_for_embedding, n_components=50) -> np.ndarray:
+def remove_correlated_features(X: np.ndarray, threshold: float = 0.95) -> tuple:
     """
-    Fit a PCA embedding on X_for_embedding (MI-filtered view).
-
-    Uses 50 components (vs 2 for UMAP) to retain more chemical variance
-    for KMeans clustering, while remaining fully deterministic across
-    Windows and Linux.
+    Remove features whose absolute pairwise Pearson correlation exceeds
+    *threshold*.  For each correlated pair the later-indexed column is dropped
+    (upper-triangle scan), matching the behaviour of pandas .corr() drop logic.
 
     Returns
     -------
-    X_pca : np.ndarray  shape (n, n_components)
+    X_out  : np.ndarray  decorrelated feature matrix
+    mask   : np.ndarray  bool, True = kept
     """
-    n_components = min(n_components, X_for_embedding.shape[0] - 1,
-                       X_for_embedding.shape[1])
-    print(f"PCA input: {X_for_embedding.shape}  →  {n_components} components")
-    reducer = PCA(n_components=n_components, random_state=RANDOM_STATE)
-    X_pca = reducer.fit_transform(X_for_embedding)
-    var_explained = reducer.explained_variance_ratio_.sum()
-    print(f"PCA done: {X_pca.shape}  (cumulative variance explained: {var_explained:.3f})")
-    return X_pca
+    corr_matrix = np.corrcoef(X.T)
+    upper = np.triu(np.abs(corr_matrix), k=1)
+    to_drop = [i for i in range(upper.shape[1]) if np.any(upper[:, i] > threshold)]
+    mask = np.ones(X.shape[1], dtype=bool)
+    mask[to_drop] = False
+    print(f"[CorrFilter] removed {int((~mask).sum())} features (|r|>{threshold}), "
+          f"kept {int(mask.sum())} of {X.shape[1]}")
+    return X[:, mask], mask
+
+
+# ─────────────────────────────────────────────────────────────
+# build_umap_embedding
+# ─────────────────────────────────────────────────────────────
+def build_umap_embedding(X_for_umap) -> np.ndarray:
+    """
+    Fit a 2D UMAP embedding on X_for_umap (MI-filtered view).
+    Used for CV group assignment only — not fed to the model.
+
+    Returns
+    -------
+    X_2d : np.ndarray  shape (n, 2)
+    """
+    warnings.filterwarnings('ignore', message='Graph is not fully connected')
+    print(f"UMAP input (MI-filtered, groups only): {X_for_umap.shape}")
+    reducer = umap.UMAP(n_components=2, random_state=RANDOM_STATE,
+                        n_neighbors=min(15, len(X_for_umap) - 1), min_dist=0.1)
+    X_2d = reducer.fit_transform(X_for_umap)
+    print(f"UMAP done: {X_2d.shape}")
+    return X_2d
 
 
 # ─────────────────────────────────────────────────────────────
 # select_kmeans_groups
 # ─────────────────────────────────────────────────────────────
-def select_kmeans_groups(X_2d, y, n_splits=3) -> tuple:
+def select_kmeans_groups(X_2d, y, n_splits=3, n_repeats_tune=1, n_repeats_eval=5) -> tuple:
     """
     Sweep KMeans k values to find the best silhouette score while ensuring
     >= 5 crystalline samples in every CV validation fold.
 
     Returns
     -------
-    groups  : np.ndarray  int cluster labels (n,)
-    best_k  : int
-    cv      : StratifiedGroupKFold
+    groups   : np.ndarray  int cluster labels (n,)
+    best_k   : int
+    cv_tune  : RepeatedStratifiedGroupKFold  lightweight (1 repeat) for Optuna
+    cv_eval  : RepeatedStratifiedGroupKFold  stable (n_repeats_eval repeats) for final eval
     """
     print("\n─── KMeans cluster sweep ──────────────────────────────")
     print(f"{'k':>5} {'Silhouette':>12} {'Min class-2 in val':>20} {'Status':>12}")
 
     best_k, best_score = None, -1
-    cv = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
 
     for k in range(8, 30, 2):
         km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10)
@@ -254,7 +304,8 @@ def select_kmeans_groups(X_2d, y, n_splits=3) -> tuple:
             sil = silhouette_score(X_2d, labels_k)
             worst = 999
             try:
-                for _, val_idx in cv.split(X_2d, y, labels_k):
+                cv_fb = StratifiedGroupKFold(n_splits=n_splits, shuffle=True, random_state=42)
+                for _, val_idx in cv_fb.split(X_2d, y, labels_k):
                     worst = min(worst, (y[val_idx] == 2).sum())
             except ValueError:
                 worst = 0
@@ -270,7 +321,18 @@ def select_kmeans_groups(X_2d, y, n_splits=3) -> tuple:
     n_groups = len(np.unique(groups))
     print(f"Groups: {n_groups} | Avg per group: {len(y)/n_groups:.1f}")
 
-    return groups, best_k, cv
+    cv_tune = RepeatedStratifiedGroupKFold(
+        n_splits=n_splits, n_repeats=n_repeats_tune, random_state=42
+    )
+    cv_eval = RepeatedStratifiedGroupKFold(
+        n_splits=n_splits, n_repeats=n_repeats_eval, random_state=42
+    )
+    print(f"cv_tune : {n_splits}-fold × {n_repeats_tune} repeat  = "
+          f"{n_splits * n_repeats_tune} fits per Optuna trial")
+    print(f"cv_eval : {n_splits}-fold × {n_repeats_eval} repeats = "
+          f"{n_splits * n_repeats_eval} fits for final evaluation")
+
+    return groups, best_k, cv_tune, cv_eval
 
 
 # ─────────────────────────────────────────────────────────────
