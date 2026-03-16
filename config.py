@@ -87,6 +87,13 @@ PROCESS_COLS = [
     'reaction_hours',
     'reaction_hours_missing',
     'temperature_k_missing',
+    'umol_metal_precursor',
+    'umol_linker',
+    'umol_modulator',
+    'metal_conc',
+    'linker_conc',
+    'mod_conc',
+    'total_conc',
 ]
 
 # ── Model / training constants ────────────────────────────────────────────────
@@ -96,9 +103,11 @@ XGB_TUNED_KEYS = {
     "n_estimators", "max_depth", "learning_rate", "subsample",
     "colsample_bytree", "min_child_weight", "gamma", "reg_alpha", "reg_lambda",
 }
-MI_K         = 5500
-CL_EMB_DIM   = 128
-RANDOM_STATE = 42
+MI_K              = 5500
+CL_EMB_DIM        = 128
+CL_MARGIN         = 1.0   # TripletMarginLoss margin
+CL_NEGATIVE_CLASS = 1     # 1 = partial/hard negatives, 0 = amorphous/easy negatives
+RANDOM_STATE      = 42
 CV_NJOBS     = 1   # Windows: XGBoost/RF multiprocessing + joblib causes access violations
 
 # ── ChemBERTa ────────────────────────────────────────────────────────────────
