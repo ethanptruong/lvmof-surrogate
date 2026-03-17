@@ -138,18 +138,25 @@ def apply_variance_threshold(X) -> tuple:
 # ─────────────────────────────────────────────────────────────
 # run_mi_diagnostic
 # ─────────────────────────────────────────────────────────────
-def run_mi_diagnostic(X_vt, y):
+def run_mi_diagnostic(X_vt, y, discrete_mask=None):
     """
     Fit SelectKBest(MI) on X_vt for diagnostic purposes only.
     Does NOT transform X (no leakage).
+
+    Parameters
+    ----------
+    discrete_mask : np.ndarray[bool] or None
+        Per-column mask for X_vt: True = discrete, False = continuous.
+        If None, falls back to True (all discrete, legacy behaviour).
 
     Returns
     -------
     mi_pre : fitted SelectKBest transformer
     """
+    disc = True if discrete_mask is None else discrete_mask
     mi_pre = SelectKBest(
         score_func=lambda X, y: mutual_info_classif(
-            X, y, discrete_features=True, random_state=RANDOM_STATE
+            X, y, discrete_features=disc, random_state=RANDOM_STATE
         ),
         k=min(MI_K, X_vt.shape[1]),
     )
@@ -338,27 +345,120 @@ def select_kmeans_groups(X_2d, y, n_splits=3, n_repeats_tune=1, n_repeats_eval=5
 # ─────────────────────────────────────────────────────────────
 # plot_mi_cliff
 # ─────────────────────────────────────────────────────────────
-def plot_mi_cliff(mi_pre) -> None:
-    """Plot and save MI score cliff diagnostic."""
-    mi_scores_sorted = np.sort(mi_pre.scores_)[::-1]
+def _cliff_suggested_cutoff(scores_sorted: np.ndarray) -> int:
+    """Return the rank at which the MI cliff drops to near-noise.
 
-    for rank in [300, 400, 500, 750, 1000, 1500, 2000, 2500, 3000,
-                 3500, 4000, 4500, 5000, 5500]:
-        if rank <= len(mi_scores_sorted):
-            print(f"MI at rank {rank:5d}: {mi_scores_sorted[rank-1]:.5f}")
+    Uses two complementary heuristics and takes the more conservative
+    (lower) of the two so the plot annotation is clearly visible:
 
-    plt.figure(figsize=(10, 4))
-    plt.plot(mi_scores_sorted[:10000])
-    plt.axvline(300,  color='red',    linestyle='--', label='k=300')
-    plt.axvline(750,  color='orange', linestyle='--', label='k=750')
-    plt.axvline(5500, color='green',  linestyle='--', label='k=5500')
-    plt.xlabel("Feature rank")
-    plt.ylabel("MI score")
-    plt.title("MI score cliff")
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig("mi_cliff.png", dpi=150)
-    plt.show()
+    1. 5%-of-peak threshold  — first rank where score < 0.05 × max
+    2. Second-derivative elbow — rank of maximum curvature in the
+       normalised score curve (same logic as AdaptiveSelectKBest._find_mi_elbow)
+
+    Returns the suggested rank (1-indexed), capped at len(scores_sorted).
+    """
+    n = len(scores_sorted)
+    if n == 0:
+        return 0
+
+    # Heuristic 1: 5 % of peak
+    threshold = 0.05 * scores_sorted[0] if scores_sorted[0] > 0 else 0.0
+    below = np.where(scores_sorted < threshold)[0]
+    h1 = int(below[0]) if len(below) else n
+
+    # Heuristic 2: second-derivative elbow on the normalised curve
+    s = scores_sorted.copy()
+    if s[0] > 0:
+        s = s / s[0]
+    d2 = np.diff(s, n=2)
+    h2 = int(np.argmax(d2)) + 1 if len(d2) else n
+
+    return max(1, min(h1, h2, n))
+
+
+def plot_mi_cliff(mi_pre, discrete_mask=None) -> None:
+    """Plot MI score cliff diagnostic, split by discrete vs continuous.
+
+    When *discrete_mask* is supplied (a boolean array aligned to mi_pre.scores_)
+    the function produces two side-by-side panels — one for discrete features
+    (fingerprints, OHE, …) and one for continuous features (physico-chem,
+    SOAP, Mordred RAC, …).  Each panel shows the sorted MI score curve with
+    the current budget line and a suggested elbow cutoff.
+
+    Without a mask the original single-panel behaviour is used.
+
+    Parameters
+    ----------
+    mi_pre       : fitted SelectKBest (has .scores_ attribute)
+    discrete_mask: np.ndarray[bool] | None  — True = discrete column
+    """
+    scores = mi_pre.scores_
+
+    # ── helper that plots one panel ─────────────────────────────────────────
+    def _panel(ax, scores_sub, label, current_k, color_k):
+        sorted_s = np.sort(scores_sub)[::-1]
+        n        = len(sorted_s)
+
+        suggest = _cliff_suggested_cutoff(sorted_s)
+
+        ax.plot(sorted_s, color='steelblue', linewidth=1.5)
+        ax.set_xlabel("Feature rank")
+        ax.set_ylabel("MI score")
+        ax.set_title(label, fontsize=11)
+
+        if current_k is not None and current_k <= n:
+            ax.axvline(current_k, color=color_k, linestyle='--',
+                       linewidth=1.4, label=f'current k={current_k}')
+        ax.axvline(suggest, color='crimson', linestyle=':',
+                   linewidth=1.4,
+                   label=f'suggested cutoff={suggest}')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    # ── two-panel mode ──────────────────────────────────────────────────────
+    if discrete_mask is not None:
+        disc  = np.asarray(discrete_mask, dtype=bool)
+        # align mask length to scores length
+        if len(disc) > len(scores):
+            disc = disc[:len(scores)]
+        elif len(disc) < len(scores):
+            disc = np.r_[disc, np.zeros(len(scores) - len(disc), dtype=bool)]
+
+        scores_disc = scores[disc]
+        scores_cont = scores[~disc]
+
+        from config import MI_K
+        mi_k_cont = getattr(__import__('config'), 'MI_K_CONTINUOUS', None)
+
+        fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+        _panel(axes[0], scores_disc, "Discrete features (FP / OHE / MACCS)",
+               MI_K, 'blue')
+        _panel(axes[1], scores_cont, "Continuous features (physico-chem / SOAP / Mordred…)",
+               mi_k_cont, 'darkorange')
+
+        fig.suptitle("MI score cliffs — discrete vs continuous", fontsize=13)
+        plt.tight_layout()
+        plt.savefig("mi_cliff.png", dpi=150)
+        plt.close(fig)
+
+    # ── legacy single-panel mode ────────────────────────────────────────────
+    else:
+        mi_scores_sorted = np.sort(scores)[::-1]
+        suggest = _cliff_suggested_cutoff(mi_scores_sorted)
+
+        fig, ax = plt.subplots(figsize=(10, 4))
+        ax.plot(mi_scores_sorted[:10000])
+        ax.axvline(MI_K,    color='blue',   linestyle='--',
+                   label=f'k={MI_K} (current)')
+        ax.axvline(suggest, color='crimson', linestyle=':',
+                   label=f'suggested cutoff={suggest}')
+        ax.set_xlabel("Feature rank")
+        ax.set_ylabel("MI score")
+        ax.set_title("MI score cliff")
+        ax.legend()
+        plt.tight_layout()
+        plt.savefig("mi_cliff.png", dpi=150)
+        plt.close(fig)
 
 
 # ─────────────────────────────────────────────────────────────

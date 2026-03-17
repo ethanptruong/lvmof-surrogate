@@ -26,6 +26,7 @@ from config import (COLMAP, N_CLUSTERS, RANDOM_STATE, XGB_TUNED_KEYS,
                     COMPLEX_BLOCK_DIM, TOTAL_VOLUME_ML)
 from data_processing import load_data, build_inventory, merge_data, run_process_variable_audit, fix_missingness
 from feature_assembly import (assemble_features, build_feature_catalog,
+                               build_discrete_mask,
                                build_chemberta_block, build_g14_features,
                                build_ttp_features, build_linker_extra_features,
                                build_halide_block, build_drfp_block,
@@ -36,7 +37,8 @@ from feature_assembly import (assemble_features, build_feature_catalog,
 from featurization import get_metal_descriptors, lookup_metal_descriptors
 from dimensionality import (prepare_labels, remap_score, apply_variance_threshold,
                              build_umap_embedding, select_kmeans_groups,
-                             run_mi_diagnostic, build_process_interactions,
+                             run_mi_diagnostic, plot_mi_cliff,
+                             build_process_interactions,
                              assemble_cv_matrix, remove_correlated_features,
                              RepeatedStratifiedGroupKFold)
 from models import (scoring_ordinal, FrankHallOrdinalClassifier,
@@ -100,6 +102,8 @@ def _featurize_data(data_path=None):
     y = np.array([remap_score(s) for s in y])
 
     X_vt, vt_pre = apply_variance_threshold(X_raw)
+    # Diagnostic MI is re-run below with the corrected discrete mask;
+    # run a quick placeholder here so UMAP grouping can proceed.
     mi_pre = run_mi_diagnostic(X_vt, y)
     Xprocnorm, interactions, _ = build_process_interactions(df_merged, mask, process_cols_present)
     X_for_umap = assemble_cv_matrix(mi_pre.transform(X_vt), Xprocnorm, interactions)
@@ -194,6 +198,55 @@ def _featurize_data(data_path=None):
         vt_mask=vt_mask,
     )
 
+    # ── Build discrete/continuous feature mask (Fix 1) ─────────────────────
+    discrete_mask, vt_discrete_mask = build_discrete_mask(
+        X_linker=X_linker,
+        X_modulator=X_modulator,
+        mod_eq=mod_eq,
+        X_precursor_perlig=X_precursor_perlig,
+        Xinventorynumeric=Xinventorynumeric,
+        X_process=X_process,
+        fp_cols=fp_cols,
+        num_descriptors=num_descriptors,
+        ohe_cols=ohe_cols,
+        process_cols_present=process_cols_present,
+        n_clusters=N_CLUSTERS,
+        X_modulator_rac_aug=X_modulator_rac_aug,
+        X_metal_block=X_metal_block,
+        Xprecursor_full=Xprecursor_full,
+        X_precursor_perlig_rac=X_precursor_perlig_rac,
+        X_linker_phys10=X_linker_phys10,
+        X_modulator_phys10=X_modulator_phys10,
+        X_modulator_tep=X_modulator_tep,
+        X_linker_tep=X_linker_tep,
+        X_precursor_perlig_tep=X_precursor_perlig_tep,
+        X_precursor_perlig_steric=X_precursor_perlig_steric,
+        X_chemberta_block=X_chemberta_block,
+        chemberta_names=chemberta_names,
+        X_g14_block=X_g14_block,
+        g14_names=g14_names,
+        Xlinker_ttp=Xlinker_ttp,
+        X_linker_extra=X_linker_extra,
+        Xhalide_full=Xhalide_full,
+        X_drfp=X_drfp,
+        X_soap_precursor=X_soap_precursor,
+        X_soap_linker=X_soap_linker,
+        soap_names=soap_names,
+        vt_mask=vt_mask,
+    )
+
+    # Pad/trim discrete mask to match X_cv width (same logic as names)
+    if len(discrete_mask) < X_cv.shape[1]:
+        extra = X_cv.shape[1] - len(discrete_mask)
+        discrete_mask = np.concatenate([discrete_mask, np.zeros(extra, dtype=bool)])
+    else:
+        discrete_mask = discrete_mask[:X_cv.shape[1]]
+
+    n_disc = int(discrete_mask.sum())
+    n_cont = len(discrete_mask) - n_disc
+    print(f"[discrete mask] {n_disc} discrete, {n_cont} continuous "
+          f"of {len(discrete_mask)} total features")
+
     # Pad/trim to match X_cv width
     if len(X_names) < X_cv.shape[1]:
         extra = X_cv.shape[1] - len(X_names)
@@ -204,7 +257,7 @@ def _featurize_data(data_path=None):
         X_groups = X_groups[:X_cv.shape[1]]
 
     print(f"[catalog] {len(X_names)} feature names for {X_cv.shape[1]} columns")
-    return X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups
+    return X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups, discrete_mask, vt_discrete_mask
 
 
 def main(data_path=None, skip_tuning=False):
@@ -214,21 +267,38 @@ def main(data_path=None, skip_tuning=False):
     # ── Steps 1–4: data + features + CV setup ─────────────────────────────────
 
     ck = _load(DATA_CKPT)
-    if ck is not None and "X_names" in ck:
+    if ck is not None and "discrete_mask" in ck:
         X_cv, y, groups = ck["X_cv"], ck["y"], ck["groups"]
         cv_tune, cv_eval = ck["cv_tune"], ck["cv_eval"]
         X_names, X_groups = ck["X_names"], ck["X_groups"]
+        discrete_mask    = ck["discrete_mask"]
+        vt_discrete_mask = ck.get("vt_discrete_mask", discrete_mask)
     else:
         if ck is not None:
-            print("\n── Checkpoint outdated (missing feature names), re-featurizing ──")
+            print("\n── Checkpoint outdated (missing discrete mask), re-featurizing ──")
         else:
             print("\n── Featurizing from data file ──")
-        X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups = _featurize_data(data_path)
+        X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups, discrete_mask, \
+            vt_discrete_mask = _featurize_data(data_path)
 
         joblib.dump({"X_cv": X_cv, "y": y, "groups": groups,
                      "cv_tune": cv_tune, "cv_eval": cv_eval,
-                     "X_names": X_names, "X_groups": X_groups}, DATA_CKPT)
+                     "X_names": X_names, "X_groups": X_groups,
+                     "discrete_mask": discrete_mask,
+                     "vt_discrete_mask": vt_discrete_mask}, DATA_CKPT)
         print(f"[checkpoint] saved {DATA_CKPT}")
+
+    # ── Wire discrete mask into models (Fix 1) ───────────────────────────────
+    import models as _models_mod
+    _models_mod.ORIGINAL_DISCRETE_MASK = discrete_mask
+    print(f"[discrete mask] set ORIGINAL_DISCRETE_MASK: "
+          f"{int(discrete_mask.sum())} discrete / "
+          f"{len(discrete_mask) - int(discrete_mask.sum())} continuous")
+
+    # ── MI cliff plot (always regenerated from cached mask — fast) ───────────
+    print("── MI cliff diagnostic (discrete vs continuous) ──")
+    mi_cliff_scores = run_mi_diagnostic(X_cv, y, discrete_mask=discrete_mask)
+    plot_mi_cliff(mi_cliff_scores, discrete_mask=discrete_mask)
 
     # ── Steps 5–6: Optuna tuning (one study per pipeline variant) ─────────────
     _REQUIRED_KEYS = {
@@ -246,6 +316,9 @@ def main(data_path=None, skip_tuning=False):
         best_rf_cl_only_params  = ck_params["best_rf_cl_only_params"]
         if skip_tuning:
             print("\n── Using existing hyperparameters (--skip-tuning) ──")
+            print("   NOTE: If you changed MI_K, CL_EMB_DIM, or discrete mask, "
+                  "consider re-tuning (run without --skip-tuning) and deleting "
+                  "checkpoints/best_params.pkl + checkpoints/optuna.db")
     elif skip_tuning:
         raise RuntimeError(
             "No tuned hyperparameters found (checkpoints/best_params.pkl missing). "

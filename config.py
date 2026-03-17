@@ -100,8 +100,9 @@ XGB_TUNED_KEYS = {
     "n_estimators", "max_depth", "learning_rate", "subsample",
     "colsample_bytree", "min_child_weight", "gamma", "reg_alpha", "reg_lambda",
 }
-MI_K              = 1600
-CL_EMB_DIM        = 128
+MI_K              = 100   # discrete feature budget 
+MI_K_CONTINUOUS   = 1000   # continuous feature budget 
+CL_EMB_DIM        = 64
 CL_MARGIN         = 1.0   # TripletMarginLoss margin
 CL_NEGATIVE_CLASS = 1     # 1 = partial/hard negatives, 0 = amorphous/easy negatives
 RANDOM_STATE      = 42

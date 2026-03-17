@@ -25,8 +25,8 @@ from xgboost import XGBClassifier, XGBRegressor
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
 
-from config import (RANDOM_STATE, MI_K, CL_EMB_DIM, CL_MARGIN, CL_NEGATIVE_CLASS,
-                    SMOTE_STRATEGY, XGB_FIXED, XGB_TUNED_KEYS)
+from config import (RANDOM_STATE, MI_K, MI_K_CONTINUOUS, CL_EMB_DIM, CL_MARGIN,
+                    CL_NEGATIVE_CLASS, SMOTE_STRATEGY, XGB_FIXED, XGB_TUNED_KEYS)
 
 warnings.filterwarnings(
     "ignore",
@@ -226,15 +226,15 @@ scoring_ordinal = {
 # 3.  Triplet Contrastive Learning
 # ─────────────────────────────────────────────────────────────
 class _TripletEncoder(nn.Module):
-    """MLP: input_dim → hidden_dim (BatchNorm + ReLU + Dropout(0.2)) → embedding_dim."""
+    """MLP: input_dim → hidden_dim (BatchNorm + ReLU + Dropout(0.4)) → embedding_dim."""
 
-    def __init__(self, input_dim, hidden_dim, embedding_dim):
+    def __init__(self, input_dim, hidden_dim, embedding_dim, dropout=0.4):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.BatchNorm1d(hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, embedding_dim),
         )
 
@@ -273,14 +273,15 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
 
     def __init__(
         self,
-        embedding_dim=128,
-        hidden_dim=256,
+        embedding_dim=32,
+        hidden_dim=128,
         margin=1.0,
         negative_class=1,
-        epochs=15,
+        epochs=8,
         batch_size=128,
         lr=1e-3,
         weight_decay=1e-4,
+        dropout=0.4,
         balanced_batches=True,
         random_state=42,
         device=None,
@@ -295,6 +296,7 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
         self.batch_size       = batch_size
         self.lr               = lr
         self.weight_decay     = weight_decay
+        self.dropout          = dropout
         self.balanced_batches = balanced_batches
         self.random_state     = random_state
         self.device           = device
@@ -406,6 +408,7 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
             input_dim=X_scaled.shape[1],
             hidden_dim=self.hidden_dim,
             embedding_dim=self.embedding_dim,
+            dropout=self.dropout,
         ).to(device)
 
         opt   = optim.Adam(
@@ -487,12 +490,14 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
     def __init__(
         self,
         k=5500,
+        k_continuous=None,
         with_cl=False,
         embedding_dim=128,
         base_discrete_mask=None,
         random_state=42,
     ):
         self.k = k
+        self.k_continuous = k_continuous
         self.with_cl = with_cl
         self.embedding_dim = embedding_dim
         self.base_discrete_mask = base_discrete_mask
@@ -503,11 +508,13 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
             if self.base_discrete_mask is None:
                 return True
             mask = np.asarray(self.base_discrete_mask, dtype=bool)
-            if len(mask) != n_features:
-                raise ValueError(
-                    f"base_discrete_mask has length {len(mask)} "
-                    f"but X has {n_features} features."
-                )
+            # Pipeline's internal VT may drop a few columns vs. the
+            # pre-computed mask.  Truncate if needed (dropped cols are gone).
+            if len(mask) > n_features:
+                mask = mask[:n_features]
+            elif len(mask) < n_features:
+                # Extra columns (shouldn't happen) — assume continuous
+                mask = np.r_[mask, np.zeros(n_features - len(mask), dtype=bool)]
             return mask
 
         n_orig = n_features - self.embedding_dim
@@ -521,38 +528,103 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
             base_mask = np.ones(n_orig, dtype=bool)
         else:
             base_mask = np.asarray(self.base_discrete_mask, dtype=bool)
-            if len(base_mask) != n_orig:
-                raise ValueError(
-                    f"base_discrete_mask has length {len(base_mask)} "
-                    f"but original block has {n_orig}."
-                )
+            # Same truncation tolerance as above
+            if len(base_mask) > n_orig:
+                base_mask = base_mask[:n_orig]
+            elif len(base_mask) < n_orig:
+                base_mask = np.r_[base_mask, np.zeros(n_orig - len(base_mask), dtype=bool)]
 
         # CL embedding columns are continuous
         return np.r_[base_mask, np.zeros(self.embedding_dim, dtype=bool)]
 
+    @staticmethod
+    def _find_mi_elbow(scores, max_k):
+        """Find the elbow in sorted MI scores via max-gap-to-baseline.
+
+        Sorts scores descending, computes the second derivative, and picks
+        the rank where marginal information drops most sharply.  Falls back
+        to max_k if no clear elbow is found.  Returns at least 50 features.
+        """
+        sorted_scores = np.sort(scores)[::-1]
+        n = len(sorted_scores)
+        if n <= 50:
+            return n
+
+        # Normalise to [0, 1] for numeric stability
+        s = sorted_scores[:max_k].copy()
+        if s[0] == 0:
+            return max_k
+        s /= s[0]
+
+        # Second derivative (curvature) — elbow is at the maximum
+        d2 = np.diff(s, n=2)
+        if len(d2) == 0:
+            return max_k
+
+        elbow_idx = int(np.argmax(d2)) + 1  # +1 because diff loses an element
+        # Ensure at least 50 features and cap at max_k
+        elbow_k = max(50, min(elbow_idx, max_k))
+        return elbow_k
+
     def fit(self, X, y):
         X = np.asarray(X)
-        k_use = min(self.k, X.shape[1])
-        disc  = self._disc_mask(X.shape[1])
+        disc = self._disc_mask(X.shape[1])
 
+        # Compute MI scores first
+        mi_scores = mutual_info_classif(
+            X, y,
+            discrete_features=disc,
+            random_state=self.random_state,
+        )
+
+        # Determine selected feature mask
+        self._selected_mask = None
+
+        if self.k == "auto":
+            k_use = self._find_mi_elbow(mi_scores, X.shape[1])
+            print(f"[MI auto] elbow at k={k_use} / {X.shape[1]} features")
+        elif self.k_continuous is not None and isinstance(disc, np.ndarray):
+            # Stratified selection: separate budgets for discrete and continuous features
+            disc_bool = disc.astype(bool)
+            disc_idx  = np.where(disc_bool)[0]
+            cont_idx  = np.where(~disc_bool)[0]
+
+            k_disc = min(self.k, len(disc_idx))
+            k_cont = min(self.k_continuous, len(cont_idx))
+
+            top_disc = disc_idx[np.argsort(mi_scores[disc_idx])[::-1][:k_disc]]
+            top_cont = cont_idx[np.argsort(mi_scores[cont_idx])[::-1][:k_cont]]
+
+            mask = np.zeros(X.shape[1], dtype=bool)
+            mask[top_disc] = True
+            mask[top_cont] = True
+
+            k_use = int(mask.sum())
+            self._selected_mask = mask
+            print(f"[MI stratified] {k_disc} discrete + {k_cont} continuous = {k_use} total features")
+        else:
+            k_use = min(self.k, X.shape[1])
+
+        # Build a SelectKBest for score storage / fallback transform
         self.selector_ = SelectKBest(
-            score_func=lambda Xin, yin: mutual_info_classif(
-                Xin,
-                yin,
-                discrete_features=disc,
-                random_state=self.random_state,
-            ),
+            score_func=lambda Xin, yin: mi_scores,
             k=k_use,
         )
         self.selector_.fit(X, y)
+        self.mi_scores_ = mi_scores
+        self.k_effective_ = k_use
         return self
 
     def transform(self, X):
         check_is_fitted(self, "selector_")
+        if self._selected_mask is not None:
+            return np.asarray(X)[:, self._selected_mask]
         return self.selector_.transform(X)
 
     def get_support(self, indices=False):
         check_is_fitted(self, "selector_")
+        if self._selected_mask is not None:
+            return np.where(self._selected_mask)[0] if indices else self._selected_mask
         return self.selector_.get_support(indices=indices)
 
 
@@ -577,10 +649,10 @@ def _base_steps(with_cl: bool) -> list:
             "cl",
             TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
-                hidden_dim=256,
+                hidden_dim=128,
                 margin=CL_MARGIN,
                 negative_class=CL_NEGATIVE_CLASS,
-                epochs=15,
+                epochs=8,
                 batch_size=128,
                 lr=1e-3,
                 weight_decay=1e-4,
@@ -596,6 +668,7 @@ def _base_steps(with_cl: bool) -> list:
             "mi",
             AdaptiveSelectKBest(
                 k=MI_K,
+                k_continuous=MI_K_CONTINUOUS,
                 with_cl=with_cl,
                 embedding_dim=CL_EMB_DIM,
                 base_discrete_mask=ORIGINAL_DISCRETE_MASK,
@@ -629,10 +702,10 @@ def _cl_only_steps() -> list:
             "cl",
             TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
-                hidden_dim=256,
+                hidden_dim=128,
                 margin=CL_MARGIN,
                 negative_class=CL_NEGATIVE_CLASS,
-                epochs=15,
+                epochs=8,
                 batch_size=128,
                 lr=1e-3,
                 weight_decay=1e-4,
@@ -738,10 +811,10 @@ def _base_steps_regression(with_cl: bool) -> list:
             "cl",
             TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
-                hidden_dim=256,
+                hidden_dim=128,
                 margin=CL_MARGIN,
                 negative_class=CL_NEGATIVE_CLASS,
-                epochs=15,
+                epochs=8,
                 batch_size=128,
                 lr=1e-3,
                 weight_decay=1e-4,
@@ -755,6 +828,7 @@ def _base_steps_regression(with_cl: bool) -> list:
         "mi",
         AdaptiveSelectKBest(
             k=MI_K,
+            k_continuous=MI_K_CONTINUOUS,
             with_cl=with_cl,
             embedding_dim=CL_EMB_DIM,
             base_discrete_mask=ORIGINAL_DISCRETE_MASK,
@@ -807,10 +881,10 @@ def _cl_only_steps_regression() -> list:
             "cl",
             TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
-                hidden_dim=256,
+                hidden_dim=128,
                 margin=CL_MARGIN,
                 negative_class=CL_NEGATIVE_CLASS,
-                epochs=15,
+                epochs=8,
                 batch_size=128,
                 lr=1e-3,
                 weight_decay=1e-4,

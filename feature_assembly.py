@@ -1180,3 +1180,154 @@ def build_feature_catalog(
     vt_groups += ['Process Interactions'] * len(_INTERACTION_NAMES)
 
     return vt_names, vt_groups
+
+
+def build_discrete_mask(
+    X_linker, X_modulator, mod_eq,
+    X_precursor_perlig, Xinventorynumeric, X_process,
+    fp_cols, num_descriptors, ohe_cols,
+    process_cols_present, n_clusters,
+    X_modulator_rac_aug, X_metal_block,
+    Xprecursor_full, X_precursor_perlig_rac,
+    X_linker_phys10, X_modulator_phys10,
+    X_modulator_tep, X_linker_tep, X_precursor_perlig_tep,
+    X_precursor_perlig_steric,
+    X_chemberta_block, chemberta_names,
+    X_g14_block, g14_names,
+    Xlinker_ttp,
+    X_linker_extra,
+    Xhalide_full,
+    X_drfp,
+    X_soap_precursor, X_soap_linker, soap_names,
+    vt_mask,
+):
+    """Build a boolean mask: True = discrete/binary, False = continuous.
+
+    Mirrors the exact block ordering in build_feature_catalog so index i
+    in the mask corresponds to the same column as index i in the name array.
+    After construction the VT mask is applied, then process-variable and
+    interaction columns are appended (all continuous except the high-temp flag).
+
+    Returns
+    -------
+    discrete : np.ndarray[bool]  — length matches X_cv columns
+    """
+    mask_parts: list[np.ndarray] = []
+
+    def _d(n):
+        """n discrete (True) entries."""
+        mask_parts.append(np.ones(n, dtype=bool))
+
+    def _c(n):
+        """n continuous (False) entries."""
+        mask_parts.append(np.zeros(n, dtype=bool))
+
+    n_fp_lig = len(fp_cols)
+
+    # ── X_features block ──
+    # 1. Linker Morgan FP — binary
+    _d(X_linker.shape[1])
+    # 2. Modulator Morgan FP — binary
+    _d(X_modulator.shape[1])
+    # 3. Modulator equivalents — continuous
+    _c(mod_eq.shape[1])
+    # 4. Per-ligand precursor: 2048 binary FP + 1 continuous count each
+    for _ in range(n_fp_lig):
+        _d(2048)   # fingerprint bits
+        _c(1)      # count
+    # 5. Inventory numeric — continuous
+    _c(Xinventorynumeric.shape[1])
+    # 6. Process variables (raw) — continuous
+    _c(len(process_cols_present))
+
+    # ── Mordred RAC block — continuous descriptors + 2 QA cols ──
+    _c(num_descriptors + 2)
+
+    # ── Metal block: continuous descriptors + OHE (discrete) ──
+    n_metal_desc = len(_METAL_DESC_NAMES)
+    n_metal_ohe = len(ohe_cols)
+    _c(n_metal_desc)   # mendeleev descriptors
+    _d(n_metal_ohe)    # metal OHE
+
+    # ── Precursor full block (metal center + coligand + complex) — continuous ──
+    _c(METAL_BLOCK_DIM + COLIGAND_BLOCK_DIM + COMPLEX_BLOCK_DIM)
+
+    # ── Per-ligand RAC — continuous (descriptors + QA + count) ──
+    for _ in range(n_fp_lig):
+        _c(num_descriptors + 3)
+
+    # ── Physicochemical — continuous ──
+    _c(X_linker_phys10.shape[1])
+    _c(X_modulator_phys10.shape[1])
+
+    # ── TEP — continuous ──
+    _c(X_modulator_tep.shape[1])
+    _c(X_linker_tep.shape[1])
+    for _ in range(n_fp_lig):
+        _c(3)   # tep_val, miss_flag, count
+
+    # ── Steric — continuous ──
+    for _ in range(n_fp_lig):
+        _c(4)   # cone_angle, buried_vol, miss, count
+
+    # ── ChemBERTa block (linker + modulator) ──
+    # Per molecule: BERT_DIM(cont) + ExtRDKit(cont) + Shape3D(cont)
+    #   + VSA(cont) + Composition(cont) + MACCS(discrete) + Fragments(discrete)
+    from config import BERT_DIM
+    _per_mol_cont = BERT_DIM + _N_TOTAL + len(SHAPE_3D_NAMES) + len(VSA_NAMES) + len(COMPOSITION_NAMES)
+    _per_mol_disc = len(MACCS_NAMES) + len(FRAGMENT_NAMES)
+    for _ in range(2):  # linker, modulator
+        _c(_per_mol_cont)
+        _d(_per_mol_disc)
+
+    # ── G14 block ──
+    # Hub topology features — mostly continuous (counts, fractions, etc.)
+    # but binary flags (g14hub_present, isSi/Ge/Sn/Pb, missing) are discrete.
+    # SMARTS pattern counts — discrete (integer match counts, mostly 0/1).
+    # For simplicity: hub = continuous, SMARTS = discrete
+    n_hub = len(G14_HUB_NAMES)
+    n_smarts = len(ALL_G14_SMARTS_NAMES)
+    _c(n_hub)      # linker hub
+    _c(n_hub)      # modulator hub
+    _d(n_smarts)   # linker SMARTS
+    _d(n_smarts)   # modulator SMARTS
+
+    # ── TTP — continuous ──
+    _c(len(TTP_FEATURE_NAMES))
+
+    # ── Linker extra: EState(79, discrete) + Topo(14, cont)
+    #    + Torsion(1024, discrete) + AtomPair(2048, discrete) ──
+    _d(79)     # EState FP
+    _c(14)     # topological descriptors
+    _d(1024)   # torsion FP
+    _d(2048)   # atom-pair FP
+
+    # ── Halide — continuous (counts & type encoding) ──
+    _c(len(HALIDE_FEAT_COLS))
+
+    # ── DRFP — discrete (binary fingerprint) ──
+    _d(2048)
+
+    # ── SOAP — continuous ──
+    _c(X_soap_precursor.shape[1])
+    _c(X_soap_linker.shape[1])
+
+    # ── KMeans cluster OHE — discrete ──
+    _d(n_clusters)
+
+    # Concatenate all parts
+    full_mask = np.concatenate(mask_parts)
+
+    # Apply VT mask (same as feature catalog)
+    vt_only_discrete = full_mask[vt_mask]
+
+    # Full X_cv mask: VT features + process (continuous) + interactions
+    cv_discrete = np.concatenate([
+        vt_only_discrete,
+        # Process (normalized) — continuous
+        np.zeros(len(process_cols_present), dtype=bool),
+        # Interactions — 5 continuous + 1 discrete (high-temp flag)
+        np.array([False, False, False, False, False, True], dtype=bool),
+    ])
+
+    return cv_discrete, vt_only_discrete
