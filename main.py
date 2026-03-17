@@ -16,12 +16,24 @@ import joblib
 import numpy as np
 import optuna
 
+import pandas as pd
+
 from config import (COLMAP, N_CLUSTERS, RANDOM_STATE, XGB_TUNED_KEYS,
                     BO_N_ITERATIONS, BO_BATCH_SIZE, BO_INIT_FRACTION,
                     BO_BORE_GAMMA, BO_CHECKPOINT_DIR, BO_DEFAULT_SURROGATE,
-                    BO_DEFAULT_ACQUISITION, BO_CONTROLLABLE_PARAMS)
+                    BO_DEFAULT_ACQUISITION, BO_CONTROLLABLE_PARAMS,
+                    TARGET_METALS, METAL_BLOCK_DIM, COLIGAND_BLOCK_DIM,
+                    COMPLEX_BLOCK_DIM, TOTAL_VOLUME_ML)
 from data_processing import load_data, build_inventory, merge_data, run_process_variable_audit, fix_missingness
-from feature_assembly import assemble_features
+from feature_assembly import (assemble_features, build_feature_catalog,
+                               build_chemberta_block, build_g14_features,
+                               build_ttp_features, build_linker_extra_features,
+                               build_halide_block, build_drfp_block,
+                               build_soap_block, build_mordred_rac_features,
+                               build_precursor_full_block,
+                               build_physicochem_features, build_tep_features,
+                               build_steric_features)
+from featurization import get_metal_descriptors, lookup_metal_descriptors
 from dimensionality import (prepare_labels, remap_score, apply_variance_threshold,
                              build_umap_embedding, select_kmeans_groups,
                              run_mi_diagnostic, build_process_interactions,
@@ -35,7 +47,7 @@ from pipeline import (objective_xgb, objective_rf, progress_callback,
                       objective_xgb_cl_only, objective_rf_cl_only,
                       eval_pipe)
 from evaluation import (plot_roc_prc, plot_learning_curves,
-                         plot_confusion_matrices, run_shap_analysis)
+                         plot_confusion_matrices, run_shap_featurized)
 import random
 import torch
 
@@ -70,7 +82,7 @@ def _load(path):
 def _featurize_data(data_path=None):
     """Run the full featurization pipeline from the Excel file.
 
-    Returns (X_cv, y, groups, cv_tune, cv_eval).
+    Returns (X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups).
     Always re-featurizes from the source file (no data.pkl cache).
     """
     df = load_data(data_path or "data/Experiments_with_Calculated_Properties_no_linker.xlsx")
@@ -95,7 +107,104 @@ def _featurize_data(data_path=None):
     X_cv = assemble_cv_matrix(X_vt, Xprocnorm, interactions)
     groups, best_k, cv_tune, cv_eval = select_kmeans_groups(X_2d, y)
 
-    return X_cv, y, groups, cv_tune, cv_eval
+    # ── Build feature name catalog (mirrors run_shap.py) ──────────────────────
+    print("── Building feature name catalog ──")
+    X_modulator_rac_aug, _, X_precursor_perlig_rac = \
+        build_mordred_rac_features(df_merged, fp_cols, num_descriptors, calc)
+
+    metal_ohe_df = pd.get_dummies(
+        df_merged['metal_atom'].fillna('Unknown'), prefix='metal_is'
+    )
+    for sym in TARGET_METALS:
+        col = f'metal_is_{sym}'
+        if col not in metal_ohe_df.columns:
+            metal_ohe_df[col] = 0
+    ohe_cols = sorted([c for c in metal_ohe_df.columns if c.startswith('metal_is_')])
+    metal_ohe_df = metal_ohe_df[ohe_cols]
+
+    metal_descriptor_cache = {sym: get_metal_descriptors(sym) for sym in TARGET_METALS}
+    zero_descriptor = get_metal_descriptors("XYZ")
+    metal_descriptor_names = list(next(iter(metal_descriptor_cache.values())).keys())
+    metal_descriptor_rows = df_merged['metal_atom'].apply(
+        lambda s: lookup_metal_descriptors(s, metal_descriptor_cache, zero_descriptor)
+    )
+    X_metal = np.array([
+        [row[name] for name in metal_descriptor_names]
+        for row in metal_descriptor_rows
+    ], dtype=float)
+    bad = ~np.isfinite(X_metal)
+    if bad.any():
+        X_metal[bad] = 0.0
+    X_metal_block = np.hstack([X_metal, metal_ohe_df.values.astype(float)])
+
+    Xprecursor_full = build_precursor_full_block(df_merged)
+    X_linker_phys10, X_modulator_phys10 = build_physicochem_features(
+        df_merged, linker_col, mod_col
+    )
+    X_modulator_tep, X_linker_tep, X_precursor_perlig_tep = \
+        build_tep_features(df_merged, linker_col, mod_col, fp_cols)
+    df_merged, X_precursor_perlig_steric = build_steric_features(df_merged, fp_cols)
+    X_chemberta_block, chemberta_names = build_chemberta_block(
+        df_merged, linker_col, mod_col
+    )
+    X_g14_block, g14_names = build_g14_features(df_merged, linker_col, mod_col)
+    Xlinker_ttp, _ = build_ttp_features(df_merged, linker_col)
+    X_linker_extra = build_linker_extra_features(df_merged, linker_col)
+    Xhalide_full = build_halide_block(df_merged, df_inventory)
+    X_drfp, _ = build_drfp_block(df_merged)
+    X_soap_precursor, X_soap_linker, soap_names = build_soap_block(
+        df_merged, linker_col
+    )
+
+    vt_mask = vt_pre.get_support()
+    X_names, X_groups = build_feature_catalog(
+        X_final=X_final,
+        X_linker=X_linker,
+        X_modulator=X_modulator,
+        mod_eq=mod_eq,
+        X_precursor_perlig=X_precursor_perlig,
+        Xinventorynumeric=Xinventorynumeric,
+        X_process=X_process,
+        fp_cols=fp_cols,
+        num_descriptors=num_descriptors,
+        ohe_cols=ohe_cols,
+        process_cols_present=process_cols_present,
+        n_clusters=N_CLUSTERS,
+        X_modulator_rac_aug=X_modulator_rac_aug,
+        X_metal_block=X_metal_block,
+        Xprecursor_full=Xprecursor_full,
+        X_precursor_perlig_rac=X_precursor_perlig_rac,
+        X_linker_phys10=X_linker_phys10,
+        X_modulator_phys10=X_modulator_phys10,
+        X_modulator_tep=X_modulator_tep,
+        X_linker_tep=X_linker_tep,
+        X_precursor_perlig_tep=X_precursor_perlig_tep,
+        X_precursor_perlig_steric=X_precursor_perlig_steric,
+        X_chemberta_block=X_chemberta_block,
+        chemberta_names=chemberta_names,
+        X_g14_block=X_g14_block,
+        g14_names=g14_names,
+        Xlinker_ttp=Xlinker_ttp,
+        X_linker_extra=X_linker_extra,
+        Xhalide_full=Xhalide_full,
+        X_drfp=X_drfp,
+        X_soap_precursor=X_soap_precursor,
+        X_soap_linker=X_soap_linker,
+        soap_names=soap_names,
+        vt_mask=vt_mask,
+    )
+
+    # Pad/trim to match X_cv width
+    if len(X_names) < X_cv.shape[1]:
+        extra = X_cv.shape[1] - len(X_names)
+        X_names += [f'unknown_{i}' for i in range(extra)]
+        X_groups += ['Unknown'] * extra
+    else:
+        X_names = X_names[:X_cv.shape[1]]
+        X_groups = X_groups[:X_cv.shape[1]]
+
+    print(f"[catalog] {len(X_names)} feature names for {X_cv.shape[1]} columns")
+    return X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups
 
 
 def main(data_path=None, skip_tuning=False):
@@ -105,15 +214,20 @@ def main(data_path=None, skip_tuning=False):
     # ── Steps 1–4: data + features + CV setup ─────────────────────────────────
 
     ck = _load(DATA_CKPT)
-    if ck is not None:
+    if ck is not None and "X_names" in ck:
         X_cv, y, groups = ck["X_cv"], ck["y"], ck["groups"]
         cv_tune, cv_eval = ck["cv_tune"], ck["cv_eval"]
+        X_names, X_groups = ck["X_names"], ck["X_groups"]
     else:
-        print("\n── Featurizing from data file ──")
-        X_cv, y, groups, cv_tune, cv_eval = _featurize_data(data_path)
+        if ck is not None:
+            print("\n── Checkpoint outdated (missing feature names), re-featurizing ──")
+        else:
+            print("\n── Featurizing from data file ──")
+        X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups = _featurize_data(data_path)
 
         joblib.dump({"X_cv": X_cv, "y": y, "groups": groups,
-                     "cv_tune": cv_tune, "cv_eval": cv_eval}, DATA_CKPT)
+                     "cv_tune": cv_tune, "cv_eval": cv_eval,
+                     "X_names": X_names, "X_groups": X_groups}, DATA_CKPT)
         print(f"[checkpoint] saved {DATA_CKPT}")
 
     # ── Steps 5–6: Optuna tuning (one study per pipeline variant) ─────────────
@@ -202,8 +316,8 @@ def main(data_path=None, skip_tuning=False):
         ("RF  | CL + MI",         pipe_rf_cl_mi,    1),
         ("XGB | MI only",         pipe_xgb_mi,      1),
         ("XGB | CL + MI",         pipe_xgb_cl_mi,   1),
-        ("RF  | CL only (supcon)", pipe_rf_cl_only,  1),
-        ("XGB | CL only (supcon)", pipe_xgb_cl_only, 1),
+        ("RF  | CL only (triplet)", pipe_rf_cl_only,  1),
+        ("XGB | CL only (triplet)", pipe_xgb_cl_only, 1),
     ]
 
     # 8. Evaluate
@@ -215,15 +329,15 @@ def main(data_path=None, skip_tuning=False):
     plot_roc_prc(pipelines, X_cv, y, cv_eval, groups)
     plot_learning_curves(pipelines, X_cv, y, cv_eval, groups, scoring_ordinal)
     plot_confusion_matrices(pipelines, X_cv, y, cv_eval, groups)
-    run_shap_analysis(
-        [("XGB | MI only",          pipe_xgb_mi),
-         ("XGB | CL + MI",          pipe_xgb_cl_mi),
-         ("XGB | CL only (supcon)", pipe_xgb_cl_only),
-         ("RF  | MI only",          pipe_rf_mi),
-         ("RF  | CL + MI",          pipe_rf_cl_mi),
-         ("RF  | CL only (supcon)", pipe_rf_cl_only)],
-        X_cv, y
-    )
+    for _shap_label, _shap_pipe in [
+        ("XGB | MI only",           pipe_xgb_mi),
+        ("XGB | CL + MI",           pipe_xgb_cl_mi),
+        ("XGB | CL only (triplet)", pipe_xgb_cl_only),
+        ("RF  | MI only",           pipe_rf_mi),
+        ("RF  | CL + MI",           pipe_rf_cl_mi),
+        ("RF  | CL only (triplet)", pipe_rf_cl_only),
+    ]:
+        run_shap_featurized(_shap_label, _shap_pipe, X_cv, y, X_names, X_groups, top_n=15)
 
 # ── Bayesian Optimization ────────────────────────────────────────────────────
 
@@ -507,16 +621,32 @@ def _run_recommend(args):
     print(f"  Controllable params: {controllable}")
 
     extra_params = BO_OPTIONAL_PARAMS if args.bo_include_mlr else None
+
+    # Load feature names from data checkpoint (stable across new experiment rows)
+    _ck_data = _load(DATA_CKPT) or {}
+    X_names = _ck_data.get("X_names", [f"f_{i}" for i in range(X_cv.shape[1])])
+
+    from cosmo_features import CosmoMixer
+    cosmo_mixer = CosmoMixer(
+        index_path=os.path.join("data", "VT-2005_Sigma_Profile_Database_Index_v2.xlsx"),
+        cosmo_folder=os.path.join("data", "solvent_cosmo"),
+    )
+
     search_space = SearchSpace(
-        train_df=df_merged[mask], extra_params=extra_params
+        train_df=df_merged[mask], solvent_mixer=cosmo_mixer, extra_params=extra_params
     )
     candidates = search_space.generate_lhs_candidates(
         seed=RANDOM_STATE + iteration  # different candidates each iteration
     )
 
-    template_row = np.nanmedian(X_cv, axis=0)
-    feature_columns = [f"f_{i}" for i in range(X_cv.shape[1])]
-    featurizer = CandidateFeaturizer(template_row, feature_columns)
+    featurizer = CandidateFeaturizer(
+        template_row=np.nanmedian(X_cv, axis=0),
+        X_names=X_names,
+        X_cv=X_cv,
+        process_cols_present=process_cols_present,
+        cosmo_mixer=cosmo_mixer,
+        total_volume_ml=TOTAL_VOLUME_ML,
+    )
     X_candidates = featurizer.featurize(candidates)
 
     # 5. Score candidates

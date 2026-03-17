@@ -25,8 +25,8 @@ from xgboost import XGBClassifier, XGBRegressor
 from imblearn.pipeline import Pipeline as ImbPipeline
 from imblearn.over_sampling import SMOTE
 
-from config import (RANDOM_STATE, MI_K, CL_EMB_DIM, SMOTE_STRATEGY,
-                    XGB_FIXED, XGB_TUNED_KEYS)
+from config import (RANDOM_STATE, MI_K, CL_EMB_DIM, CL_MARGIN, CL_NEGATIVE_CLASS,
+                    SMOTE_STRATEGY, XGB_FIXED, XGB_TUNED_KEYS)
 
 warnings.filterwarnings(
     "ignore",
@@ -223,9 +223,9 @@ scoring_ordinal = {
 
 
 # ─────────────────────────────────────────────────────────────
-# 3.  Supervised Contrastive Learning (SupCon)
+# 3.  Triplet Contrastive Learning
 # ─────────────────────────────────────────────────────────────
-class _SupConEncoder(nn.Module):
+class _TripletEncoder(nn.Module):
     """MLP: input_dim → hidden_dim (BatchNorm + ReLU + Dropout(0.2)) → embedding_dim."""
 
     def __init__(self, input_dim, hidden_dim, embedding_dim):
@@ -242,13 +242,15 @@ class _SupConEncoder(nn.Module):
         return self.net(x)
 
 
-class SupConTrainer(BaseEstimator, TransformerMixin):
+class TripletTrainer(BaseEstimator, TransformerMixin):
     """
-    Sklearn-compatible supervised contrastive feature augmenter.
+    Sklearn-compatible triplet contrastive feature augmenter.
 
-    fit(X, y)    — trains _SupConEncoder via supervised contrastive loss.
-                   All samples of the same class act as mutual positives;
-                   samples of different classes act as negatives.
+    fit(X, y)    — trains _TripletEncoder via triplet margin loss.
+                   Anchors are crystalline samples (label=2).
+                   Positives are other crystalline samples (label=2).
+                   Negatives are sampled from negative_class
+                   (1=partial/hard, 0=amorphous/easy).
     transform(X) — returns [X | ℓ2-normalized embedding] when concat_original=True,
                    or just the embedding when concat_original=False.
 
@@ -256,7 +258,8 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
     ----------
     embedding_dim    : int    output embedding size (default 128)
     hidden_dim       : int    MLP hidden layer width (default 256)
-    temperature      : float  SupCon temperature τ (default 0.07)
+    margin           : float  TripletMarginLoss margin (default 1.0)
+    negative_class   : int    class used as negatives (1=hard, 0=easy; default 1)
     epochs           : int    training epochs (default 15)
     batch_size       : int    DataLoader batch size (default 128)
     lr               : float  Adam learning rate (default 1e-3)
@@ -272,7 +275,8 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
         self,
         embedding_dim=128,
         hidden_dim=256,
-        temperature=0.07,
+        margin=1.0,
+        negative_class=1,
         epochs=15,
         batch_size=128,
         lr=1e-3,
@@ -285,7 +289,8 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
     ):
         self.embedding_dim    = embedding_dim
         self.hidden_dim       = hidden_dim
-        self.temperature      = temperature
+        self.margin           = margin
+        self.negative_class   = negative_class
         self.epochs           = epochs
         self.batch_size       = batch_size
         self.lr               = lr
@@ -307,32 +312,46 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.random_state)
 
-    def _supcon_loss(self, z, y):
+    def _triplet_loss(self, z, y):
         """
-        Supervised contrastive loss (Khosla et al., 2020).
+        Triplet margin loss for MOF crystallinity task.
 
-        For each anchor i, positives are all j ≠ i with y[j] == y[i].
-        Loss = -1/|P(i)| * Σ_{j∈P(i)} log( exp(z_i·z_j/τ) /
-                                             Σ_{k≠i} exp(z_i·z_k/τ) )
-        averaged over anchors that have at least one positive.
+        Anchor:   label == 2 (crystalline)
+        Positive: another label == 2 sample (randomly sampled from the batch)
+        Negative: label == self.negative_class
+                  (1 = partial/hard negatives, 0 = amorphous/easy negatives)
+
+        Anchors with no valid positive or negative in the batch are skipped.
+        Returns None if no valid triplets can be formed.
         """
-        z   = F.normalize(z, dim=1)
-        n   = z.shape[0]
-        eye = torch.eye(n, dtype=torch.bool, device=z.device)
+        z = F.normalize(z, dim=1)
+        criterion = nn.TripletMarginLoss(margin=self.margin, reduction="mean")
 
-        logits   = torch.matmul(z, z.T) / self.temperature
-        logits   = logits.masked_fill(eye, -1e9)
+        anchor_idx   = (y == 2).nonzero(as_tuple=True)[0]
+        negative_idx = (y == self.negative_class).nonzero(as_tuple=True)[0]
 
-        pos_mask  = (y.view(-1, 1) == y.view(1, -1)) & (~eye)
-        pos_counts = pos_mask.sum(dim=1)
-        valid      = pos_counts > 0
-
-        if valid.sum() == 0:
+        if len(anchor_idx) < 2 or len(negative_idx) == 0:
             return None
 
-        log_prob          = F.log_softmax(logits, dim=1)
-        mean_log_prob_pos = (pos_mask * log_prob).sum(dim=1) / pos_counts.clamp(min=1)
-        return -mean_log_prob_pos[valid].mean()
+        anchors, positives, negatives = [], [], []
+        for a_i in anchor_idx:
+            pos_pool = anchor_idx[anchor_idx != a_i]
+            if len(pos_pool) == 0:
+                continue
+            p_i = pos_pool[torch.randint(len(pos_pool), (1,), device=z.device)].item()
+            n_i = negative_idx[torch.randint(len(negative_idx), (1,), device=z.device)].item()
+            anchors.append(z[a_i])
+            positives.append(z[p_i])
+            negatives.append(z[n_i])
+
+        if len(anchors) == 0:
+            return None
+
+        return criterion(
+            torch.stack(anchors),
+            torch.stack(positives),
+            torch.stack(negatives),
+        )
 
     def _make_loader(self, X, y):
         X_t = torch.tensor(X, dtype=torch.float32)
@@ -383,7 +402,7 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
 
         # Model, loss, optimizer, scheduler
         device = self._get_device()
-        self.encoder_ = _SupConEncoder(
+        self.encoder_ = _TripletEncoder(
             input_dim=X_scaled.shape[1],
             hidden_dim=self.hidden_dim,
             embedding_dim=self.embedding_dim,
@@ -407,7 +426,7 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
                 yb = yb.to(device)
 
                 z    = self.encoder_(xb)
-                loss = self._supcon_loss(z, yb)
+                loss = self._triplet_loss(z, yb)
 
                 if loss is None or not torch.isfinite(loss):
                     continue
@@ -423,7 +442,7 @@ class SupConTrainer(BaseEstimator, TransformerMixin):
             self.loss_history_.append(epoch_loss)
 
             if self.verbose:
-                print(f"[SupConTrainer] epoch {epoch+1:02d}/{self.epochs}  "
+                print(f"[TripletTrainer] epoch {epoch+1:02d}/{self.epochs}  "
                       f"loss={epoch_loss:.4f}")
 
         self.encoder_.cpu()
@@ -543,9 +562,9 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
 def _base_steps(with_cl: bool) -> list:
     """
     Common feature prefix:
-        impute -> vt -> [SupCon CL] -> mi -> pca -> smote
+        impute -> vt -> [Triplet CL] -> mi -> pca -> smote
 
-    When with_cl=True the SupConTrainer appends a 128-d embedding to the
+    When with_cl=True the TripletTrainer appends a 128-d embedding to the
     VT-filtered features before MI selection.
     """
     steps = [
@@ -556,10 +575,11 @@ def _base_steps(with_cl: bool) -> list:
     if with_cl:
         steps.append((
             "cl",
-            SupConTrainer(
+            TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
                 hidden_dim=256,
-                temperature=0.07,
+                margin=CL_MARGIN,
+                negative_class=CL_NEGATIVE_CLASS,
                 epochs=15,
                 batch_size=128,
                 lr=1e-3,
@@ -597,20 +617,21 @@ def _base_steps(with_cl: bool) -> list:
 def _cl_only_steps() -> list:
     """
     CL-only feature pipeline:
-        impute -> vt -> SupCon CL (embedding only) -> smote
+        impute -> vt -> Triplet CL (embedding only) -> smote
 
     No MI selection: the downstream classifier operates purely on the
-    128-d SupCon embedding space.
+    128-d triplet embedding space.
     """
     return [
         ("impute", SimpleImputer(strategy="median")),
         ("vt",     VarianceThreshold(threshold=0.0)),
         (
             "cl",
-            SupConTrainer(
+            TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
                 hidden_dim=256,
-                temperature=0.07,
+                margin=CL_MARGIN,
+                negative_class=CL_NEGATIVE_CLASS,
                 epochs=15,
                 batch_size=128,
                 lr=1e-3,
@@ -715,10 +736,11 @@ def _base_steps_regression(with_cl: bool) -> list:
     if with_cl:
         steps.append((
             "cl",
-            SupConTrainer(
+            TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
                 hidden_dim=256,
-                temperature=0.07,
+                margin=CL_MARGIN,
+                negative_class=CL_NEGATIVE_CLASS,
                 epochs=15,
                 batch_size=128,
                 lr=1e-3,
@@ -783,10 +805,11 @@ def _cl_only_steps_regression() -> list:
         ("vt",     VarianceThreshold(threshold=0.0)),
         (
             "cl",
-            SupConTrainer(
+            TripletTrainer(
                 embedding_dim=CL_EMB_DIM,
                 hidden_dim=256,
-                temperature=0.07,
+                margin=CL_MARGIN,
+                negative_class=CL_NEGATIVE_CLASS,
                 epochs=15,
                 batch_size=128,
                 lr=1e-3,

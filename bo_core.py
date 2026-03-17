@@ -47,12 +47,14 @@ from config import (
     BO_OPTIONAL_PARAMS,
     BO_TOTAL_CONC_CLIP_PERCENTILES,
     BO_LOG_SCALE_PARAMS,
+    TOTAL_VOLUME_ML,
     XGB_FIXED,
 )
 from cosmo_features import (
     load_cosmo_index,
     load_sigma_profile,
     compute_sigma_moments,
+    CosmoMixer,
 )
 
 
@@ -160,16 +162,15 @@ class SolventMixer:
 # SearchSpace
 # ─────────────────────────────────────────────────────────────
 class SearchSpace:
-    """Generate candidate parameter sets: LHS over continuous × solvent compositions."""
+    """Generate candidate parameter sets: LHS over continuous params × solvent pairs.
+
+    phi_1 (solvent_1 volume fraction) is now a continuous BO parameter in the LHS;
+    the solvent_mixer is used only to enumerate unique (sol1, sol2) pairs observed
+    in the training data.  COSMO features are computed on-the-fly by
+    CandidateFeaturizer using CosmoMixer.
+    """
 
     def __init__(self, train_df=None, solvent_mixer=None, extra_params=None):
-        """
-        Parameters
-        ----------
-        extra_params : dict or None
-            Additional {param: (lo, hi)} to include beyond BO_CONTROLLABLE_PARAMS.
-            Use this to toggle optional params like metal_over_linker_ratio.
-        """
         all_params = dict(BO_CONTROLLABLE_PARAMS)
         if extra_params:
             all_params.update(extra_params)
@@ -189,16 +190,43 @@ class SearchSpace:
                 self.bounds[param] = (1.0, 100.0)  # fallback
 
         self.solvent_mixer = solvent_mixer
-        self.solvent_compositions = (
-            solvent_mixer.enumerate_all() if solvent_mixer is not None else [{}]
+        # Enumerate unique (sol1, sol2) pairs from training data
+        self.solvent_pairs = (
+            self._enumerate_pairs(train_df, solvent_mixer)
+            if solvent_mixer is not None and train_df is not None
+            else [{"solvent_1": "", "solvent_2": ""}]
         )
 
+    def _enumerate_pairs(self, train_df, solvent_mixer):
+        """Build unique (sol1, sol2) pairs observed in training data."""
+        available = set(solvent_mixer.available_solvents_from_df(train_df))
+        seen = set()
+        pairs = []
+        for _, row in train_df.iterrows():
+            sol1 = str(row.get("solvent_1", "")).strip().upper()
+            sol2 = str(row.get("solvent_2", "")).strip().upper()
+            if sol2 in ("", "NAN", "NONE"):
+                sol2 = ""
+            if not sol1 or sol1 not in available:
+                continue
+            if sol2 and sol2 not in available:
+                sol2 = ""
+            key = (sol1, sol2)
+            if key not in seen:
+                seen.add(key)
+                pairs.append({"solvent_1": sol1, "solvent_2": sol2})
+        return pairs if pairs else [{"solvent_1": "", "solvent_2": ""}]
+
     def generate_lhs_candidates(self, n_samples=BO_N_LHS_SAMPLES, seed=RANDOM_STATE):
-        """Generate LHS candidates over continuous params × solvent compositions."""
+        """Generate LHS candidates over continuous params × solvent pairs.
+
+        phi_1 is sampled as a continuous variable in the LHS alongside other
+        process parameters; it is NOT fixed per solvent pair.
+        """
         rng = np.random.RandomState(seed)
         n_params = len(self.bounds)
 
-        # Simple LHS: divide each dim into n_samples intervals, shuffle
+        # Simple LHS
         lhs_samples = np.zeros((n_samples, n_params))
         for j in range(n_params):
             perm = rng.permutation(n_samples)
@@ -218,17 +246,12 @@ class SearchSpace:
 
         lhs_df = pd.DataFrame(candidates)
 
-        # Cross with solvent compositions
+        # Cross LHS samples with solvent pairs
         all_candidates = []
-        for comp in self.solvent_compositions:
+        for pair in self.solvent_pairs:
             chunk = lhs_df.copy()
-            for key, val in comp.items():
-                if key not in ("solvent_1", "solvent_2", "ratio"):
-                    chunk[key] = val
-            chunk["solvent_1"] = comp.get("solvent_1", "")
-            chunk["solvent_2"] = comp.get("solvent_2", "")
-            ratio = comp.get("ratio", (1, 0))
-            chunk["ratio_str"] = f"{ratio[0]}:{ratio[1]}"
+            chunk["solvent_1"] = pair["solvent_1"]
+            chunk["solvent_2"] = pair["solvent_2"]
             all_candidates.append(chunk)
 
         return pd.concat(all_candidates, ignore_index=True)
@@ -579,45 +602,174 @@ def _compute_acquisition(
 # CandidateFeaturizer
 # ─────────────────────────────────────────────────────────────
 class CandidateFeaturizer:
-    """Convert fixed chemistry + process parameter candidates → full feature matrix.
+    """Convert BO knobs → full X_cv-compatible feature matrix.
 
-    Usage:
-        cf = CandidateFeaturizer(template_X_row, feature_columns)
-        X_full = cf.featurize(candidates_df)
+    Uses X_names from the feature catalog to locate columns by name, so
+    overrides are positionally correct regardless of which features survived
+    the variance threshold.
+
+    Handles four categories of derived features:
+      1. Process knobs  — proc_raw:X (raw) + proc:X (MinMax-normalised)
+      2. Solvent fractions — proc_raw/proc solvent_1/2_fraction from phi_1
+      3. Concentration cols — metal_conc / linker_conc / umol_* from total_conc + ratio
+      4. COSMO features   — computed on-the-fly via CosmoMixer from (sol1, sol2, phi_1)
+      5. Interaction terms — recomputed from updated normalised process values
     """
 
-    def __init__(self, template_row, feature_columns, process_param_cols=None):
+    def __init__(
+        self,
+        template_row,
+        X_names,
+        X_cv,
+        process_cols_present,
+        cosmo_mixer=None,
+        total_volume_ml=TOTAL_VOLUME_ML,
+    ):
         self.template_row = np.array(template_row).flatten()
-        self.feature_columns = list(feature_columns)
-        self.process_param_cols = process_param_cols or list(BO_CONTROLLABLE_PARAMS.keys())
+        self.X_names = list(X_names)
+        self.process_cols_present = list(process_cols_present)
+        self.cosmo_mixer = cosmo_mixer
+        self.total_volume_ml = float(total_volume_ml)
 
-    def featurize(self, candidates_df):
-        """Create full feature matrix by tiling template and overriding process params."""
+        # name → column index lookup
+        self._idx = {name: i for i, name in enumerate(X_names)}
+
+        # Infer MinMax scale for each process column from training X_cv.
+        # proc_raw:X columns hold the raw values → use their min/max to normalise
+        # the corresponding proc:X (normalised) columns.
+        self._proc_scale: dict = {}   # bare_col → (vmin, vmax)
+        for col in process_cols_present:
+            raw_key = f"proc_raw:{col}"
+            i = self._idx.get(raw_key)
+            if i is not None:
+                col_vals = X_cv[:, i]
+                self._proc_scale[col] = (
+                    float(np.nanmin(col_vals)),
+                    float(np.nanmax(col_vals)),
+                )
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _norm(self, col: str, raw_val) -> float:
+        """MinMax-normalise raw_val using training scale for this column."""
+        scale = self._proc_scale.get(col)
+        if scale is None:
+            return float(raw_val)
+        vmin, vmax = scale
+        if vmax == vmin:
+            return 0.0
+        return float(np.clip((raw_val - vmin) / (vmax - vmin), 0.0, 1.0))
+
+    def _norm_arr(self, col: str, raw_vals: np.ndarray) -> np.ndarray:
+        scale = self._proc_scale.get(col)
+        if scale is None:
+            return raw_vals.astype(float)
+        vmin, vmax = scale
+        if vmax == vmin:
+            return np.zeros_like(raw_vals, dtype=float)
+        return np.clip((raw_vals - vmin) / (vmax - vmin), 0.0, 1.0).astype(float)
+
+    def _set(self, X: np.ndarray, key: str, vals: np.ndarray) -> None:
+        """Write vals into column *key* if it exists."""
+        idx = self._idx.get(key)
+        if idx is not None:
+            X[:, idx] = vals
+
+    def _set_proc(self, X: np.ndarray, col: str, raw_vals: np.ndarray) -> None:
+        """Set both proc_raw:col and proc:col for a process variable."""
+        self._set(X, f"proc_raw:{col}", raw_vals)
+        self._set(X, f"proc:{col}", self._norm_arr(col, raw_vals))
+
+    # ── main ──────────────────────────────────────────────────────────────────
+
+    def featurize(self, candidates_df: pd.DataFrame) -> np.ndarray:
+        """Return full feature matrix (n_candidates × n_features)."""
         n = len(candidates_df)
         X = np.tile(self.template_row, (n, 1))
-        X_df = pd.DataFrame(X, columns=self.feature_columns)
 
-        for col in self.process_param_cols:
-            if col in candidates_df.columns and col in X_df.columns:
-                X_df[col] = candidates_df[col].values
+        # ── 1. Scalar process knobs ───────────────────────────────────────────
+        for col in BO_CONTROLLABLE_PARAMS:
+            if col in ("phi_1",):
+                continue   # handled separately below
+            if col in candidates_df.columns:
+                self._set_proc(X, col, candidates_df[col].values.astype(float))
 
-        # Override COSMO columns if present
-        cosmo_cols = [
-            "Mix_M0_Area", "Mix_M1_NetCharge", "Mix_M2_Polarity",
-            "Mix_M3_Asymmetry", "Mix_M4_Kurtosis", "Mix_M_HB_Acc",
-            "Mix_M_HB_Don", "Mix_f_nonpolar", "Mix_f_acc", "Mix_f_don",
-            "Mix_sigma_std", "Mix_Vcosmo", "Mix_lnPvap",
-        ]
-        for col in cosmo_cols:
-            if col in candidates_df.columns and col in X_df.columns:
-                X_df[col] = candidates_df[col].values
+        # ── 1b. Fix total_solvent_volume_ml to the configured synthesis volume ──
+        self._set_proc(X, "total_solvent_volume_ml",
+                       np.full(n, self.total_volume_ml))
 
-        # Solvent fractions
-        for col in ["solvent_1_fraction", "solvent_2_fraction"]:
-            if col in candidates_df.columns and col in X_df.columns:
-                X_df[col] = candidates_df[col].values
+        # ── 2. phi_1 → solvent fractions ─────────────────────────────────────
+        phi_1 = np.clip(
+            candidates_df.get("phi_1", pd.Series(np.ones(n))).values.astype(float),
+            0.0, 1.0,
+        )
+        self._set_proc(X, "solvent_1_fraction", phi_1)
+        self._set_proc(X, "solvent_2_fraction", 1.0 - phi_1)
 
-        return X_df.values
+        # ── 3. Derive concentration cols from total_conc + ratio + volume ─────
+        if "total_conc" in candidates_df.columns:
+            total_conc = candidates_df["total_conc"].values.astype(float)
+            ratio = candidates_df.get(
+                "metal_over_linker_ratio", pd.Series(np.ones(n))
+            ).values.astype(float)
+            ratio = np.where(ratio > 0, ratio, 1.0)
+            equiv = candidates_df.get(
+                "equivalents", pd.Series(np.ones(n))
+            ).values.astype(float)
+
+            metal_conc = total_conc * ratio / (1.0 + ratio)
+            linker_conc = total_conc / (1.0 + ratio)
+            umol_metal = metal_conc * self.total_volume_ml
+            umol_linker = linker_conc * self.total_volume_ml
+            # mod: equivalents = umol_mod / umol_metal (stoichiometric, unitless)
+            umol_mod  = equiv * umol_metal
+            mod_conc  = umol_mod / self.total_volume_ml
+
+            for col, vals in [
+                ("total_conc",           total_conc),
+                ("metal_conc",           metal_conc),
+                ("linker_conc",          linker_conc),
+                ("umol_metal_precursor", umol_metal),
+                ("umol_linker",          umol_linker),
+                ("umol_modulator",       umol_mod),
+                ("mod_conc",             mod_conc),
+            ]:
+                self._set_proc(X, col, vals)
+
+        # ── 4. COSMO features from (sol1, sol2, phi_1) ───────────────────────
+        if self.cosmo_mixer is not None and "solvent_1" in candidates_df.columns:
+            sol1_arr = candidates_df["solvent_1"].values
+            sol2_arr = candidates_df.get(
+                "solvent_2", pd.Series([""] * n)
+            ).values
+
+            for i in range(n):
+                cosmo = self.cosmo_mixer.compute(sol1_arr[i], sol2_arr[i], phi_1[i])
+                for col, val in cosmo.items():
+                    if np.isfinite(val):
+                        self._set_proc(X[i:i+1], col, np.array([val]))
+
+        # ── 5. Recompute interaction features ─────────────────────────────────
+        # Gather normalised values for the three terms involved
+        def _get_norm(col):
+            if col in candidates_df.columns:
+                return self._norm_arr(col, candidates_df[col].values.astype(float))
+            # Fall back to current (possibly updated) proc: column in X
+            proc_idx = self._idx.get(f"proc:{col}")
+            return X[:, proc_idx] if proc_idx is not None else np.zeros(n)
+
+        t  = _get_norm("temperature_k")
+        mr = _get_norm("metal_over_linker_ratio")
+        rh = _get_norm("reaction_hours")
+
+        self._set(X, "proc_int:temp_x_metal_ratio",      t  * mr)
+        self._set(X, "proc_int:temp_x_rxn_hours",         t  * rh)
+        self._set(X, "proc_int:metal_ratio_x_rxn_hours",  mr * rh)
+        self._set(X, "proc_int:temp_sq",                  t  ** 2)
+        self._set(X, "proc_int:metal_ratio_sq",           mr ** 2)
+        self._set(X, "proc_int:hightemp_flag",            (t > 0.85).astype(float))
+
+        return X
 
 
 # ─────────────────────────────────────────────────────────────

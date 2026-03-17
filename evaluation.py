@@ -437,18 +437,18 @@ def run_shap_analysis(pipes, X, y) -> None:
     _BAR_COLORS = {
         "XGB | MI only":          "tab:blue",
         "XGB | CL + MI":          "tab:orange",
-        "XGB | CL only (supcon)": "tab:purple",
+        "XGB | CL only (triplet)": "tab:purple",
         "RF  | MI only":          "tab:cyan",
         "RF  | CL + MI":          "tab:olive",
-        "RF  | CL only (supcon)": "tab:pink",
+        "RF  | CL only (triplet)": "tab:pink",
     }
     _AGG_COLORS = {
         "XGB | MI only":          "tab:green",
         "XGB | CL + MI":          "tab:red",
-        "XGB | CL only (supcon)": "tab:brown",
-        "RF  | MI only":          "tab:teal",
-        "RF  | CL + MI":          "tab:lime",
-        "RF  | CL only (supcon)": "tab:pink",
+        "XGB | CL only (triplet)": "tab:brown",
+        "RF  | MI only":          "tab:cyan",
+        "RF  | CL + MI":          "tab:olive",
+        "RF  | CL only (triplet)": "tab:pink",
     }
 
     for pipe_label, pipe in pipes:

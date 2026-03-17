@@ -374,6 +374,157 @@ def enrich_with_cosmo_features(
     return df_out
 
 
+# ── CosmoMixer ────────────────────────────────────────────────────────────────
+
+class CosmoMixer:
+    """
+    Load per-solvent sigma profiles once; compute mixture COSMO features on demand.
+
+    Accepts a continuous phi_1 (volume fraction of solvent_1) rather than
+    discrete volume ratios, making it suitable for Bayesian Optimisation where
+    phi_1 is a continuous search-space variable.
+
+    Usage
+    -----
+    mixer = CosmoMixer()                         # uses default index/folder paths
+    feats = mixer.compute("TOLUENE", "DICHLOROMETHANE", phi_1=0.6)
+    solvents = mixer.available_solvents_from_df(train_df)
+    """
+
+    def __init__(
+        self,
+        index_path: str = _DEFAULT_INDEX,
+        cosmo_folder: str = _DEFAULT_COSMO,
+    ):
+        self.index_map, _, self.vcosmo_map, self.lnpvap_map = load_cosmo_index(
+            index_path
+        )
+        self._cosmo_folder = cosmo_folder
+        self._cache: dict = {}   # upper_name -> (sigma_arr, area_arr) or None
+
+    # ── internal ──────────────────────────────────────────────────────────────
+
+    def _profile(self, name: str):
+        """Load and cache a sigma profile.  Returns (sigma, area) or None."""
+        key = str(name).strip().upper()
+        if key not in self._cache:
+            idx = self.index_map.get(key)
+            if idx is None:
+                self._cache[key] = None
+            else:
+                prof = load_sigma_profile(idx, self._cosmo_folder)
+                self._cache[key] = (
+                    (prof["sigma"].values.copy(), prof["area"].values.copy())
+                    if prof is not None else None
+                )
+        return self._cache[key]
+
+    @staticmethod
+    def _nan_result() -> dict:
+        return {c: np.nan for c in COSMO_COLS}
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def compute(
+        self,
+        sol1: str,
+        sol2: str | None = None,
+        phi_1: float = 1.0,
+    ) -> dict:
+        """
+        Compute all COSMO_COLS features for a solvent mixture.
+
+        Parameters
+        ----------
+        sol1  : name of solvent 1 (must be in VT-2005 index)
+        sol2  : name of solvent 2; None / empty string → pure sol1
+        phi_1 : volume fraction of solvent 1 ∈ [0, 1]
+
+        Returns
+        -------
+        dict with all COSMO_COLS keys; NaN-filled on lookup failure.
+        """
+        if not sol1 or (isinstance(sol1, float) and np.isnan(sol1)):
+            return self._nan_result()
+
+        sol1_key = str(sol1).strip().upper()
+        prof1 = self._profile(sol1_key)
+        if prof1 is None:
+            return self._nan_result()
+
+        sigma_axis, area1 = prof1
+        phi_1 = float(np.clip(phi_1, 0.0, 1.0))
+
+        # Resolve sol2
+        sol2_key: str | None = None
+        if sol2 is not None:
+            candidate = str(sol2).strip().upper()
+            if candidate not in ("", "NAN", "NONE"):
+                sol2_key = candidate
+
+        # ── Pure sol1 or no valid sol2 ────────────────────────────────────────
+        if sol2_key is None or phi_1 >= 1.0:
+            mix_area = area1
+            vc  = self.vcosmo_map.get(sol1_key, np.nan)
+            lnp = self.lnpvap_map.get(sol1_key, np.nan)
+
+        # ── Pure sol2 ─────────────────────────────────────────────────────────
+        elif phi_1 <= 0.0:
+            prof2 = self._profile(sol2_key)
+            if prof2 is None:
+                mix_area = area1
+                vc  = self.vcosmo_map.get(sol1_key, np.nan)
+                lnp = self.lnpvap_map.get(sol1_key, np.nan)
+            else:
+                _, area2 = prof2
+                mix_area = area2
+                vc  = self.vcosmo_map.get(sol2_key, np.nan)
+                lnp = self.lnpvap_map.get(sol2_key, np.nan)
+
+        # ── Binary mixture ────────────────────────────────────────────────────
+        else:
+            prof2 = self._profile(sol2_key)
+            if prof2 is None:
+                # Fall back to pure sol1
+                mix_area = area1
+                vc  = self.vcosmo_map.get(sol1_key, np.nan)
+                lnp = self.lnpvap_map.get(sol1_key, np.nan)
+            else:
+                _, area2 = prof2
+                # Convert volume fractions to mole fractions via Vcosmo proxy
+                # (moles ∝ volume / molecular_volume ≈ volume / Vcosmo)
+                vc1 = self.vcosmo_map.get(sol1_key, 1.0) or 1.0
+                vc2 = self.vcosmo_map.get(sol2_key, 1.0) or 1.0
+                proxy1 = phi_1 / vc1
+                proxy2 = (1.0 - phi_1) / vc2
+                denom  = proxy1 + proxy2
+                xf1    = proxy1 / denom if denom > 0 else phi_1
+                xf2    = 1.0 - xf1
+                mix_area = xf1 * area1 + xf2 * area2
+                vc  = (xf1 * (self.vcosmo_map.get(sol1_key, 0.0) or 0.0)
+                       + xf2 * (self.vcosmo_map.get(sol2_key, 0.0) or 0.0))
+                lnp = (xf1 * (self.lnpvap_map.get(sol1_key, 0.0) or 0.0)
+                       + xf2 * (self.lnpvap_map.get(sol2_key, 0.0) or 0.0))
+
+        result = compute_sigma_moments(sigma_axis, mix_area)
+        result["Mix_Vcosmo"] = vc
+        result["Mix_lnPvap"] = lnp
+        return result
+
+    def available_solvents_from_df(self, df: pd.DataFrame) -> list:
+        """
+        Return uppercase solvent names observed in *df* that have profiles in
+        the index.  Scans solvent_1, solvent_2, solvent_3 columns.
+        """
+        observed: set = set()
+        for k in [1, 2, 3]:
+            col = f"solvent_{k}"
+            if col in df.columns:
+                vals = df[col].dropna().astype(str).str.strip().str.upper()
+                observed.update(v for v in vals if v not in ("", "NAN", "NONE"))
+        return [s for s in observed if self._profile(s) is not None]
+
+
 # ── Standalone CLI entry point ────────────────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:

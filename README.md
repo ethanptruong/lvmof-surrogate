@@ -179,4 +179,10 @@ The feature matrix is assembled from 12 descriptor blocks:
 - **Description:** Encodes the reaction as a whole (precursor + linker + modulator).
 - **Key Features:** 2048-bit hashed fingerprint capturing the chemical transformation and local environments of all reactants simultaneously.
 
-I might try to play around with the parameters of XGBoost and RF. I have found that performance differs based on which operating system you use. 
+## Contrastive Learning Notes
+
+Both supervised contrastive (SupCon) learning and triplet-based contrastive learning have been evaluated as augmentation strategies within the `ContrastiveMITransformer`. **Triplet-based contrastive learning outperforms SupCon** in this setting and is the preferred approach.
+
+## OS / Hyperparameter Notes
+
+RF and XGBoost hyperparameters may require re-tuning depending on the operating system. Performance varies across platforms — **Linux has shown the best results so far**. If you are running on macOS or Windows, consider re-running Optuna tuning to obtain OS-appropriate hyperparameters.

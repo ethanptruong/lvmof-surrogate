@@ -87,9 +87,6 @@ PROCESS_COLS = [
     'reaction_hours',
     'reaction_hours_missing',
     'temperature_k_missing',
-    'umol_metal_precursor',
-    'umol_linker',
-    'umol_modulator',
     'metal_conc',
     'linker_conc',
     'mod_conc',
@@ -103,7 +100,7 @@ XGB_TUNED_KEYS = {
     "n_estimators", "max_depth", "learning_rate", "subsample",
     "colsample_bytree", "min_child_weight", "gamma", "reg_alpha", "reg_lambda",
 }
-MI_K              = 5500
+MI_K              = 1600
 CL_EMB_DIM        = 128
 CL_MARGIN         = 1.0   # TripletMarginLoss margin
 CL_NEGATIVE_CLASS = 1     # 1 = partial/hard negatives, 0 = amorphous/easy negatives
@@ -382,6 +379,7 @@ BO_CONTROLLABLE_PARAMS = {
     "equivalents":           (0.0, 150.0),
     "temperature_k":         (298.0, 393.0),
     "total_conc":            None,   # computed at runtime via percentile clipping
+    "phi_1":                 (0.0, 1.0),   # solvent_1 volume fraction
 }
 # Optional param, off by default — enable via --bo-include-mlr
 BO_OPTIONAL_PARAMS = {
@@ -389,3 +387,4 @@ BO_OPTIONAL_PARAMS = {
 }
 BO_TOTAL_CONC_CLIP_PERCENTILES = (5, 95)
 BO_LOG_SCALE_PARAMS            = ["total_conc"]
+TOTAL_VOLUME_ML = 2.0   # fixed synthesis volume for BO candidate featurization
