@@ -329,15 +329,29 @@ def main(data_path=None, skip_tuning=False):
     plot_roc_prc(pipelines, X_cv, y, cv_eval, groups)
     plot_learning_curves(pipelines, X_cv, y, cv_eval, groups, scoring_ordinal)
     plot_confusion_matrices(pipelines, X_cv, y, cv_eval, groups)
-    for _shap_label, _shap_pipe in [
+
+    # Pre-fit each pipeline once on the full dataset so SHAP can reuse the
+    # fitted instance rather than cloning and re-fitting from scratch.
+    from sklearn.base import clone as _clone
+    _shap_targets = [
         ("XGB | MI only",           pipe_xgb_mi),
         ("XGB | CL + MI",           pipe_xgb_cl_mi),
         ("XGB | CL only (triplet)", pipe_xgb_cl_only),
         ("RF  | MI only",           pipe_rf_mi),
         ("RF  | CL + MI",           pipe_rf_cl_mi),
         ("RF  | CL only (triplet)", pipe_rf_cl_only),
-    ]:
-        run_shap_featurized(_shap_label, _shap_pipe, X_cv, y, X_names, X_groups, top_n=15)
+    ]
+    print("\n─── Pre-fitting pipelines for SHAP (full dataset) ──────────────────")
+    _fitted_for_shap = {}
+    for _lbl, _pipe in _shap_targets:
+        print(f"  Fitting: {_lbl}")
+        _fp = _clone(_pipe)
+        _fp.fit(X_cv, y)
+        _fitted_for_shap[_lbl] = _fp
+
+    for _shap_label, _shap_pipe in _shap_targets:
+        run_shap_featurized(_shap_label, _shap_pipe, X_cv, y, X_names, X_groups,
+                            top_n=15, fitted_pipe=_fitted_for_shap[_shap_label])
 
 # ── Bayesian Optimization ────────────────────────────────────────────────────
 

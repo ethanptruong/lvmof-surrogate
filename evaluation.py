@@ -716,7 +716,8 @@ def _pal(group):
 # SECTION D  --  Main SHAP analysis + three-plot output per pipeline
 # -----------------------------------------------------------------------------
 
-def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
+def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
+                        fitted_pipe=None):
     print(f"\n{'='*70}")
     print(f"  SHAP  >>  {pipe_label}")
     print(f"{'='*70}")
@@ -725,8 +726,11 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15):
     import re
     safe_label = re.sub(r'[|<>:"/\\?*]', '_', pipe_label).strip()
 
-    fitted = clone(pipe)
-    fitted.fit(X, y)
+    if fitted_pipe is not None:
+        fitted = fitted_pipe
+    else:
+        fitted = clone(pipe)
+        fitted.fit(X, y)
 
     X_model, feat_names, feat_grps = transform_with_names(
         fitted, X, X_names, X_groups, label=pipe_label)
