@@ -124,7 +124,7 @@ Six pipeline variants are trained and compared:
 ### Model Comparison
 
 The **RF | MI only** pipeline achieved the best balance of predictive performance and generalization, with the smallest gap between training and validation QWK, indicating minimal overfitting relative to the other variants. Contrastive learning augmentation did not consistently improve performance on this dataset size (~750 experiments), likely because the triplet encoder requires more data to learn a generalizable embedding.
-
+![plot](./roc_prc_comparison.png)
 ### Learning Curves
 
 Learning curves show training vs. cross-validated QWK as a function of training set size. The RF | MI only pipeline (top-left) shows stable convergence with minimal train/validation gap, consistent with good generalization.
