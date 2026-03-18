@@ -124,7 +124,7 @@ Six pipeline variants are trained and compared:
 ### Model Comparison
 
 The **RF | MI only** pipeline achieved the best balance of predictive performance and generalization, with the smallest gap between training and validation QWK, indicating minimal overfitting relative to the other variants. Contrastive learning augmentation did not consistently improve performance on this dataset size (~750 experiments), likely because the triplet encoder requires more data to learn a generalizable embedding.
-![plot](./roc_prc_comparison.png)
+
 ### Learning Curves
 
 Learning curves show training vs. cross-validated QWK as a function of training set size. The RF | MI only pipeline (top-left) shows stable convergence with minimal train/validation gap, consistent with good generalization.
@@ -135,7 +135,7 @@ Learning curves show training vs. cross-validated QWK as a function of training 
 
 ROC and PRC curves are shown for all six pipeline variants for the Crystalline class (positive class = 2, prevalence ≈ 22.6%). The RF | MI only pipeline maintains competitive ROC-AUC and average precision relative to more complex variants.
 
-![](<roc_prc_comparison (1).png>)
+![plot](./roc_prc_comparison.png)
 
 ### Normalized Confusion Matrices
 
@@ -148,7 +148,8 @@ Row-normalized confusion matrices show the fraction of each true class predicted
 SHAP values for the RF | MI only model, aggregated over the top 15 features. Process variables (temperature, concentration, solvent properties) and metal-center descriptors dominate the top features, consistent with domain knowledge that synthesis conditions and metal identity are primary determinants of LVMOF crystallinity.
 
 ![](<shap_top15_RF  _ MI only.png>)
-
+![plot](./shap_group_RF_MI only.png)
+![plot](./shap_group_avg_RF_MI only.png)
 ---
 
 ## Interpretation, Limitations, and Next Steps
