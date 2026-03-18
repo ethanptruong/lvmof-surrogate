@@ -153,7 +153,7 @@ SHAP values for the RF | MI only model, aggregated over the top 15 features. Pro
 
 ![plot](./shap_group_RF_MI_only.png)
 
-![plot](./shap_group_avg_RF_MI_only.png)
+![plot](./shap_group_avg_RF_MIonly.png)
 
 ---
 
