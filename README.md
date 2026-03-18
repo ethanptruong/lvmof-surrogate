@@ -147,7 +147,7 @@ Row-normalized confusion matrices show the fraction of each true class predicted
 
 SHAP values for the RF | MI only model, aggregated over the top 15 features. Process variables (temperature, concentration, solvent properties) and metal-center descriptors dominate the top features, consistent with domain knowledge that synthesis conditions and metal identity are primary determinants of LVMOF crystallinity.
 
-![](<shap_top15_RF  _ MI only.png>)
+
 ![plot](./shap_group_RF_MI only.png)
 ![plot](./shap_group_avg_RF_MI only.png)
 ---
