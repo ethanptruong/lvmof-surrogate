@@ -122,7 +122,7 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
 
     plt.tight_layout()
     plt.savefig("roc_prc_comparison.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print("Saved: roc_prc_comparison.png")
 
     results_auc = (
@@ -225,7 +225,7 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
 
     plt.tight_layout()
     plt.savefig("learning_curves_qwk.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print("Saved: learning_curves_qwk.png")
 
     summary_rows = []
@@ -321,7 +321,7 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
 
     plt.tight_layout()
     plt.savefig("confusion_matrices_counts.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print("Saved: confusion_matrices_counts.png")
 
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 6 * n_rows))
@@ -338,7 +338,7 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
 
     plt.tight_layout()
     plt.savefig("confusion_matrices_normalized.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print("Saved: confusion_matrices_normalized.png")
 
     count_tables = []
@@ -427,7 +427,7 @@ def run_shap_analysis(pipes, X, y) -> None:
         plt.title(title)
         plt.tight_layout()
         plt.savefig(filename, dpi=180, bbox_inches="tight")
-        plt.show()
+        plt.close("all")
         print(f"Saved: {filename}")
 
     all_summary_rows = []
@@ -517,7 +517,7 @@ def run_shap_analysis(pipes, X, y) -> None:
                 beeswarm_name = f"shap_beeswarm_{pipe_slug}_threshold_{threshold}.png"
                 plt.tight_layout()
                 plt.savefig(beeswarm_name, dpi=180, bbox_inches="tight")
-                plt.show()
+                plt.close("all")
                 print(f"Saved: {beeswarm_name}")
             except Exception as e:
                 print(f"  Beeswarm skipped for {pipe_label}, threshold {threshold}: {e}")
@@ -588,7 +588,7 @@ def run_shap_analysis(pipes, X, y) -> None:
     plt.legend(fontsize=8)
     plt.tight_layout()
     plt.savefig("shap_pipeline_comparison.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print("Saved: shap_pipeline_comparison.png")
 
     pivot_df.reset_index().to_csv("shap_pipeline_comparison.csv", index=False)
@@ -792,7 +792,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
     ax1.spines[["top","right"]].set_visible(False)
     plt.tight_layout()
     fig1.savefig(f"shap_group_{safe_label}.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print(f"  Saved: shap_group_{safe_label}.png")
 
     df_grp.sort_values(ascending=False).reset_index().rename(
@@ -829,7 +829,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
     ax1b.spines[["top","right"]].set_visible(False)
     plt.tight_layout()
     fig1b.savefig(f"shap_group_avg_{safe_label}.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print(f"  Saved: shap_group_avg_{safe_label}.png")
 
     df_grp_avg.sort_values(ascending=False).reset_index().rename(
@@ -857,7 +857,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
     ax2.spines[["top","right"]].set_visible(False)
     plt.tight_layout()
     fig2.savefig(f"shap_top{top_n}_{safe_label}.png", dpi=180, bbox_inches="tight")
-    plt.show()
+    plt.close("all")
     print(f"  Saved: shap_top{top_n}_{safe_label}.png")
 
     # ── Plot 3 -- SHAP beeswarm (signed, top-N, avg over thresholds) ──────
@@ -884,7 +884,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
         plt.tight_layout()
         plt.savefig(f"shap_beeswarm_{safe_label}.png",
                     dpi=180, bbox_inches="tight")
-        plt.show()
+        plt.close("all")
         print(f"  Saved: shap_beeswarm_{safe_label}.png")
     except Exception as _e:
         plt.close("all")

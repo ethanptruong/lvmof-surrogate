@@ -227,6 +227,8 @@ python main.py --bo --bo-mode recommend --bo-precursor SMILES --bo-linker SMILES
 
 Delete `data.pkl` and `optuna.db` when changing `MI_K`, `MI_K_CONTINUOUS`, or the discrete feature mask.
 
+All plots (ROC/PRC, learning curves, confusion matrices, SHAP, MI cliff) are saved directly to the working directory as `.png` files without requiring any interactive window interaction. The pipeline runs fully non-interactively end-to-end.
+
 ### Reproducibility Seeds
 
 All stochastic components are seeded with `SEED = 42`:
