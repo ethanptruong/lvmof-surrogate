@@ -23,7 +23,8 @@ from config import (COLMAP, N_CLUSTERS, RANDOM_STATE, XGB_TUNED_KEYS,
                     BO_BORE_GAMMA, BO_CHECKPOINT_DIR, BO_DEFAULT_SURROGATE,
                     BO_DEFAULT_ACQUISITION, BO_CONTROLLABLE_PARAMS,
                     TARGET_METALS, METAL_BLOCK_DIM, COLIGAND_BLOCK_DIM,
-                    COMPLEX_BLOCK_DIM, TOTAL_VOLUME_ML)
+                    COMPLEX_BLOCK_DIM, TOTAL_VOLUME_ML,
+                    BO_BORE_ADAPTIVE_GAMMA, BO_SSL_ALPHA, BO_SSL_N_PSEUDO)
 from data_processing import load_data, build_inventory, merge_data, run_process_variable_audit, fix_missingness
 from feature_assembly import (assemble_features, build_feature_catalog,
                                build_discrete_mask,
@@ -498,7 +499,7 @@ def _featurize_fresh(data_path=None):
     return X_cv, y_raw, y_remapped, df_merged, mask, process_cols_present
 
 
-def _resolve_surrogate(surrogate_name, params):
+def _resolve_surrogate(surrogate_name, params, ranking_target=False):
     """Create a RegressionSurrogate from surrogate name + hyperparams.
 
     Maps each --bo-surrogate choice to the matching Optuna-tuned hyperparams:
@@ -511,7 +512,8 @@ def _resolve_surrogate(surrogate_name, params):
     """
     from models import (make_rf_regressor_pipe, make_xgb_regressor_pipe,
                         make_rf_regressor_pipe_cl_only, make_xgb_regressor_pipe_cl_only)
-    from bo_core import RegressionSurrogate, XGBoostBootstrapEnsemble
+    from bo_core import (RegressionSurrogate, XGBoostBootstrapEnsemble,
+                         RankingRegressionSurrogate)
 
     _RF_FALLBACK = {"n_estimators": 300, "max_depth": 10,
                     "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"}
@@ -536,18 +538,19 @@ def _resolve_surrogate(surrogate_name, params):
     cl_only = surrogate_name.endswith("cl_only")
     with_cl = "cl_mi" in surrogate_name
 
+    SurrClass = RankingRegressionSurrogate if ranking_target else RegressionSurrogate
     if is_rf:
         if cl_only:
             pipe = make_rf_regressor_pipe_cl_only(hp)
         else:
             pipe = make_rf_regressor_pipe(hp, with_cl=with_cl)
-        return RegressionSurrogate(pipe, model_type="rf")
+        return SurrClass(pipe, model_type="rf")
     else:
         if cl_only:
             pipe = make_xgb_regressor_pipe_cl_only(hp)
         else:
             pipe = make_xgb_regressor_pipe(hp, with_cl=with_cl)
-        surr = RegressionSurrogate(pipe, model_type="xgb")
+        surr = SurrClass(pipe, model_type="xgb")
         surr.bootstrap_ensemble = XGBoostBootstrapEnsemble(hp)
         return surr
 
@@ -555,9 +558,11 @@ def _resolve_surrogate(surrogate_name, params):
 def run_bo(args):
     """Run Bayesian Optimization in the specified mode."""
     from bo_core import BOLoop, BOCheckpointer, RegressionSurrogate
-    from bo_metrics import (SimulationMetrics, plot_convergence, plot_topk_curves,
-                            plot_af_ef_comparison, save_simulation_results,
-                            save_full_history)
+    from bo_metrics import (SimulationMetrics, plot_convergence, plot_average_score,
+                            plot_topk_curves, plot_af_ef_comparison,
+                            save_simulation_results, save_full_history,
+                            plot_simple_regret, compute_surrogate_calibration,
+                            plot_calibration)
 
     from config import BO_OPTIONAL_PARAMS
 
@@ -573,7 +578,8 @@ def run_bo(args):
     X_cv, y_raw, y_remapped, df_merged, mask = _load_bo_data(args.data)
 
     ck_params = _load(PARAMS_CKPT) or {}
-    surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
+    surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
+                                   ranking_target=args.bo_ranking_target)
 
     # Optional classifier pipeline for PI-ordinal baseline
     classifier_pipeline = None
@@ -592,6 +598,7 @@ def run_bo(args):
         n_iterations=args.bo_iterations,
         classifier_pipeline=classifier_pipeline,
         random_state=RANDOM_STATE,
+        bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
     )
 
     checkpointer = BOCheckpointer()
@@ -604,16 +611,49 @@ def run_bo(args):
         summary = metrics.summary(history)
 
         print(f"\n── Results ──")
-        print(f"  AF:          {summary['AF']:.2f}")
-        print(f"  EF:          {summary['EF']:.2f}")
+        print(f"  AF:           {summary['AF']:.2f}")
+        print(f"  EF:           {summary['EF']:.2f}")
         print(f"  Top-5% found: {summary['Top_percent_final']*100:.1f}%")
         print(f"  Best score:   {summary['best_score_final']:.0f}")
+        print(f"  Simple regret (final): {summary['simple_regret_final']:.2f}")
 
         label = f"{args.bo_acquisition}_{args.bo_surrogate}"
         checkpointer.save(f"sim_{label}", history)
         save_full_history(history, label)
         plot_convergence([history], [label], y_raw)
+        plot_average_score([history], [label],
+                           save_path=f"docs/bo_avg_score_{label}.png")
         plot_topk_curves([history], [label], y_raw)
+        plot_simple_regret([history], [label], y_raw,
+                           save_path=f"docs/bo_simple_regret_{label}.png")
+
+        # ── Surrogate calibration check ──────────────────────────────────────
+        # Refit surrogate on the initial training split, then evaluate calibration
+        # on the held-out pool.  This is a clean snapshot of how well sigma
+        # estimates the actual prediction error before any BO queries are made.
+        print(f"\n── Surrogate Calibration ({args.bo_surrogate}) ──")
+        init_idx = np.array(history["init_indices"])
+        pool_idx = np.array(history["pool_indices"])
+        surrogate.fit(X_cv[init_idx], y_raw[init_idx])
+        cal = compute_surrogate_calibration(surrogate, X_cv[pool_idx], y_raw[pool_idx])
+
+        if "error" in cal:
+            print(f"  WARNING: {cal['error']}")
+        else:
+            print(f"  n_test={cal['n_valid']}, n_zero_sigma={cal['n_zero_sigma']}")
+            print(f"  z-score mean: {cal['mean_z']:+.3f}  (ideal:  0.000)")
+            print(f"  z-score std:  {cal['std_z']:.3f}   (ideal:  1.000)")
+            print(f"  Coverage within 1σ: {cal['fraction_within_1sigma']*100:.1f}%  "
+                  f"(expected: 68.3%)")
+            print(f"  Coverage within 2σ: {cal['fraction_within_2sigma']*100:.1f}%  "
+                  f"(expected: 95.4%)")
+            print(f"  Mean calibration error: {cal['calibration_error']:.4f}  "
+                  f"(0 = perfect)")
+            if cal["calibration_error"] > 0.10:
+                print("  NOTE: calibration error > 0.10 — sigma estimates are "
+                      "unreliable. EI/LCB acquisition scores may be misleading.")
+        plot_calibration(cal, surrogate_name=args.bo_surrogate,
+                         save_path=f"docs/bo_calibration_{label}.png")
 
     elif args.bo_mode == "batch":
         print(f"\n── Batch simulation: {args.bo_acquisition} | {args.bo_surrogate} "
@@ -647,18 +687,35 @@ def _run_recommend(args):
       1. Re-featurizes the (possibly updated) data file
       2. Loads BO history from checkpoint
       3. Fits surrogate on the full current dataset
-      4. Generates candidates, scores with acquisition function
-      5. Outputs top recommendations
-      6. Saves updated BO state
+      4. Generates candidates (optionally within a trust region)
+      5. Scores with acquisition function
+      6. Outputs top recommendations
+      7. Saves updated BO state
 
-    The user's workflow:
-      - Run recommend → get top conditions
-      - Synthesize in the lab → add result row to Excel
-      - Run recommend again → surrogate refits on updated data,
-        acquisition function accounts for new observation
+    Trust region mode (--bo-precursor + --bo-linker provided)
+    ---------------------------------------------------------
+    When target chemistry SMILES are supplied, a NeighborhoodTemplateSelector
+    finds structurally similar past experiments (by linker AND precursor
+    Tanimoto similarity) and computes a similarity×score-weighted centroid of
+    their process conditions.  A TuRBO-style trust region is initialised at
+    that centroid and adapts across iterations:
+      - Expands after 3 consecutive improvements (new best pxrd_score found)
+      - Shrinks after 3 consecutive failures
+    This avoids cold-starting from an unrelated chemistry while still
+    exploring the full space if no similar experiments exist.
+
+    The user's workflow (chemistry-targeted):
+      python main.py --bo --bo-mode recommend \\
+          --bo-precursor <SMILES> --bo-linker <SMILES>
+      → Synthesize top candidate → add result to Excel → run again
+
+    Global workflow (no chemistry target, full-space search):
+      python main.py --bo --bo-mode recommend
     """
     from bo_core import (BOLoop, BOCheckpointer, SearchSpace,
-                         CandidateFeaturizer, _compute_acquisition)
+                         CandidateFeaturizer, _compute_acquisition,
+                         NeighborhoodTemplateSelector, TrustRegion,
+                         FeasibilityScorer)
     from config import BO_OPTIONAL_PARAMS
 
     print("\n" + "=" * 70)
@@ -676,42 +733,44 @@ def _run_recommend(args):
         "iteration": 0,
         "surrogate_name": args.bo_surrogate,
         "acquisition_name": args.bo_acquisition,
-        "recommendations": [],   # list of dicts per iteration
+        "recommendations": [],
         "n_data_at_each_iter": [],
+        "trust_region": None,   # persisted TrustRegion state dict
     }
 
     iteration = state["iteration"]
+    f_best    = float(y_raw.max())
+
     print(f"  BO iteration:    {iteration} (previous recommendations: {iteration})")
     print(f"  Current dataset: {len(y_raw)} experiments")
-    print(f"  Best score:      {y_raw.max():.0f}")
+    print(f"  Best score:      {f_best:.0f}")
     print(f"  Surrogate:       {args.bo_surrogate}")
     print(f"  Acquisition:     {args.bo_acquisition}")
 
-    # Show what happened since last iteration (new data added?)
     if state["n_data_at_each_iter"]:
         prev_n = state["n_data_at_each_iter"][-1]
-        new_n = len(y_raw) - prev_n
+        new_n  = len(y_raw) - prev_n
         if new_n > 0:
             print(f"  New experiments since last run: {new_n}")
-        elif new_n == 0:
+        else:
             print("  No new experiments added since last run.")
 
     # 3. Build surrogate and fit on full dataset
     ck_params = _load(PARAMS_CKPT) or {}
-    surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
+    surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
+                                   ranking_target=args.bo_ranking_target)
     surrogate.fit(X_cv, y_raw)
 
-    # 4. Generate candidates
+    # 4. Build search space
+    extra_params = BO_OPTIONAL_PARAMS if args.bo_include_mlr else None
     controllable = list(BO_CONTROLLABLE_PARAMS.keys())
     if args.bo_include_mlr:
         controllable += list(BO_OPTIONAL_PARAMS.keys())
     print(f"  Controllable params: {controllable}")
 
-    extra_params = BO_OPTIONAL_PARAMS if args.bo_include_mlr else None
-
-    # Load feature names from data checkpoint (stable across new experiment rows)
     _ck_data = _load(DATA_CKPT) or {}
-    X_names = _ck_data.get("X_names", [f"f_{i}" for i in range(X_cv.shape[1])])
+    X_names  = _ck_data.get("X_names",  [f"f_{i}" for i in range(X_cv.shape[1])])
+    X_groups = _ck_data.get("X_groups", ["Unknown"] * X_cv.shape[1])
 
     from cosmo_features import CosmoMixer
     cosmo_mixer = CosmoMixer(
@@ -722,12 +781,114 @@ def _run_recommend(args):
     search_space = SearchSpace(
         train_df=df_merged[mask], solvent_mixer=cosmo_mixer, extra_params=extra_params
     )
+
+    # ── Trust region logic ────────────────────────────────────────────────────
+    using_trust_region = (args.bo_precursor is not None and
+                          args.bo_linker    is not None)
+    trust_region = None
+    override_bounds = None
+    ref_idx = None   # chemistry template — nearest neighbor in dataset
+
+    if using_trust_region:
+        print(f"\n  [TrustRegion] Target precursor: {args.bo_precursor[:40]}...")
+        print(f"  [TrustRegion] Target linker:    {args.bo_linker[:40]}...")
+
+        # Always run the two-stage selector so we get ref_idx for the template.
+        selector = NeighborhoodTemplateSelector(
+            df_train=df_merged[mask],
+            X_cv=X_cv,
+            X_groups=X_groups,
+            linker_col=COLMAP["linker1"],
+            precursor_col=COLMAP["precursor"],
+        )
+        center, spread, neighbors, ref_idx = selector.select(
+            target_linker_smiles=args.bo_linker,
+            target_precursor_smiles=args.bo_precursor,
+            search_bounds=search_space.bounds,
+        )
+
+        if state.get("trust_region") is not None and iteration > 0:
+            # Restore existing trust region and update with latest f_best
+            trust_region = TrustRegion.from_dict(state["trust_region"])
+            trust_region.update(f_best)
+            print(f"  [TrustRegion] Restored | length={trust_region.length:.3f}")
+
+            # Recenter on the best experiment currently in the dataset
+            best_idx = int(np.argmax(y_raw))
+            best_row = df_merged[mask].iloc[best_idx]
+            new_center = {}
+            for param in search_space.bounds:
+                col = NeighborhoodTemplateSelector._PARAM_TO_COL.get(param, param)
+                val = pd.to_numeric(best_row.get(col, np.nan), errors="coerce")
+                lo, hi = search_space.bounds[param]
+                if np.isfinite(val):
+                    new_center[param] = float(np.clip(val, lo, hi))
+            trust_region.recenter(new_center)
+            print(f"  [TrustRegion] Recentered on best observed experiment.")
+
+        else:
+            # First iteration — use selector output to initialise trust region
+            if center is None:
+                print("  [TrustRegion] No similar neighbors found. "
+                      "Using global search space.")
+                using_trust_region = False
+            else:
+                spread_lengths = []
+                for param, (lo, hi) in search_space.bounds.items():
+                    full_range = hi - lo
+                    if full_range > 0:
+                        spread_lengths.append(
+                            min(1.0, 2.0 * spread.get(param, full_range / 4) / full_range)
+                        )
+                init_length = float(np.clip(np.mean(spread_lengths)
+                                            if spread_lengths else 0.8,
+                                            0.3, 0.8))
+                # Compute per-parameter scales from neighbour spread.
+                # Tightly-clustered params → scale < 1 (narrow search).
+                # Widely-spread params    → scale > 1 (broader search).
+                param_scales = {}
+                for param, (lo, hi) in search_space.bounds.items():
+                    full_range = hi - lo
+                    if full_range > 0 and spread and param in spread:
+                        normalized_spread = spread[param] / max(full_range / 4.0, 1e-9)
+                        param_scales[param] = float(np.clip(normalized_spread, 0.5, 2.0))
+                    else:
+                        param_scales[param] = 1.0
+
+                trust_region = TrustRegion(
+                    center=center,
+                    full_bounds=search_space.bounds,
+                    length=init_length,
+                    param_scales=param_scales,
+                )
+                print(f"  [TrustRegion] Initialised | length={init_length:.3f} | "
+                      f"param_scales={{{', '.join(f'{p}:{s:.2f}' for p,s in param_scales.items())}}}")
+
+        if trust_region is not None:
+            override_bounds = trust_region.get_bounds()
+            print("  [TrustRegion] Search bounds:")
+            for p, (lo, hi) in override_bounds.items():
+                print(f"    {p}: [{lo:.3g}, {hi:.3g}]")
+
+    # ── Chemistry template for featurizer ────────────────────────────────────
+    # Use the nearest-neighbor row (ref_idx) from the two-stage selector as the
+    # chemistry template.  This gives the surrogate the correct molecular context
+    # (metal / linker / modulator features) for the target chemistry, rather than
+    # defaulting to the dataset-median which may belong to a different metal family.
+    if using_trust_region and ref_idx is not None:
+        template_row = X_cv[ref_idx]
+        print(f"  [Template] Using nearest neighbor idx={ref_idx} as chemistry template.")
+    else:
+        template_row = np.nanmedian(X_cv, axis=0)
+
+    # 5. Generate candidates (within trust region if active)
     candidates = search_space.generate_lhs_candidates(
-        seed=RANDOM_STATE + iteration  # different candidates each iteration
+        seed=RANDOM_STATE + iteration,
+        override_bounds=override_bounds,
     )
 
     featurizer = CandidateFeaturizer(
-        template_row=np.nanmedian(X_cv, axis=0),
+        template_row=template_row,
         X_names=X_names,
         X_cv=X_cv,
         process_cols_present=process_cols_present,
@@ -736,27 +897,37 @@ def _run_recommend(args):
     )
     X_candidates = featurizer.featurize(candidates)
 
-    # 5. Score candidates
+    # 6. Score candidates
     mu, sigma = surrogate.predict(X_candidates)
-    f_best = y_raw.max()
 
     acq_kwargs = {
         "f_best": f_best,
         "gamma": BO_BORE_GAMMA,
         "random_state": RANDOM_STATE + iteration,
+        "bore_adaptive_gamma": BO_BORE_ADAPTIVE_GAMMA,
     }
     acq_vals = _compute_acquisition(
         args.bo_acquisition, surrogate,
         X_cv, y_raw, X_candidates, **acq_kwargs
     )
 
+    # Apply synthesis feasibility prior (if requested)
+    if args.bo_feasibility:
+        feas_scorer = FeasibilityScorer()
+        feas_scores = feas_scorer.score(candidates)
+        acq_vals    = acq_vals * feas_scores
+        n_penalized = int((feas_scores < 0.99).sum())
+        if n_penalized > 0:
+            print(f"  [Feasibility] {n_penalized}/{len(candidates)} candidates "
+                  f"penalized (T > solvent BP - margin).")
+
     results = candidates.copy()
     results["pxrd_predicted"] = mu
-    results["uncertainty"] = sigma
+    results["uncertainty"]     = sigma
     results["acquisition_value"] = acq_vals
     results = results.sort_values("acquisition_value", ascending=False)
 
-    # 6. Output
+    # 7. Output
     os.makedirs("docs", exist_ok=True)
     out_path = f"docs/bo_recommendations_iter{iteration}.csv"
     results.head(100).to_csv(out_path, index=False)
@@ -769,31 +940,55 @@ def _run_recommend(args):
     print(results[display_cols].head(10).to_string(index=False))
     print(f"\n  Full results saved → {out_path}")
 
-    # 7. Save updated state
+    # 8. Save updated state
     top_rec = results.head(args.bo_batch_size)[display_cols].to_dict("records")
     state["recommendations"].append({
-        "iteration": iteration,
-        "n_data": len(y_raw),
-        "f_best": float(f_best),
+        "iteration":     iteration,
+        "n_data":        len(y_raw),
+        "f_best":        f_best,
         "top_candidates": top_rec,
+        "trust_region_active": using_trust_region,
     })
     state["n_data_at_each_iter"].append(len(y_raw))
-    state["iteration"] = iteration + 1
-    state["surrogate_name"] = args.bo_surrogate
+    state["iteration"]        = iteration + 1
+    state["surrogate_name"]   = args.bo_surrogate
     state["acquisition_name"] = args.bo_acquisition
+    state["trust_region"]     = (trust_region.to_dict()
+                                 if trust_region is not None else None)
     checkpointer.save("recommend_state", state)
 
+    tr_flag = " --bo-precursor <SMILES> --bo-linker <SMILES>" if using_trust_region else ""
     print(f"\n  State saved. Next: synthesize top candidates, add results to data file,")
     print(f"  then run again:  python main.py --bo --bo-mode recommend "
-          f"--bo-surrogate {args.bo_surrogate}")
+          f"--bo-surrogate {args.bo_surrogate}{tr_flag}")
 
 
 def run_bo_ablation(args):
-    """Full ablation: acquisitions × surrogates × batch strategies × seeds."""
+    """Structured ablation study.
+
+    Design rationale:
+      - BORE, random, pi_ordinal do not use the regression surrogate for
+        acquisition scoring, so varying the surrogate with these methods
+        produces identical results.  They are run once per seed with a
+        fixed surrogate (args.bo_surrogate).
+      - EI, LCB, Thompson directly consume surrogate (mu, sigma), so they
+        are crossed with all six surrogates × three seeds.
+      - Calibration is evaluated once per surrogate using the seed=42 init
+        split from the EI runs (EI uses sigma, so its init split is the
+        most relevant reference).
+
+    Total runs: 3 agnostic × 3 seeds  +  3 sensitive × 6 surrogates × 3 seeds
+               + 2 batch strategies  =  9 + 54 + 2 = 65 runs
+    (vs 108 in the old design, which wasted 50% on redundant BORE/random combos)
+    """
     from bo_core import BOLoop
-    from bo_metrics import (SimulationMetrics, plot_convergence, plot_topk_curves,
-                            plot_af_ef_comparison, save_simulation_results,
-                            plot_batch_comparison, save_full_history)
+    from bo_metrics import (SimulationMetrics, plot_convergence, plot_average_score,
+                            plot_topk_curves, plot_af_ef_comparison,
+                            plot_seed_aggregated_comparison, plot_sensitive_heatmap,
+                            plot_seed_averaged_convergence,
+                            save_simulation_results, plot_batch_comparison,
+                            save_full_history, plot_simple_regret,
+                            compute_surrogate_calibration, plot_calibration)
 
     print("\n" + "=" * 70)
     print("  BO ABLATION STUDY")
@@ -802,9 +997,15 @@ def run_bo_ablation(args):
     X_cv, y_raw, y_remapped, df_merged, mask = _load_bo_data(args.data)
     ck_params = _load(PARAMS_CKPT) or {}
 
-    acquisitions = ["bore", "ei", "lcb", "pi_ordinal", "thompson", "random"]
+    # Acquisitions that do not use regression surrogate mu/sigma for scoring.
+    # "lfbo" and "lfbo_ssl" are BORE variants: same classifier approach, but
+    # lfbo recovers EI (not PI) and lfbo_ssl adds semi-supervised regularisation.
+    SURROGATE_AGNOSTIC = ["bore", "lfbo", "lfbo_ssl", "random", "pi_ordinal"]
+    # Acquisitions that consume surrogate mu/sigma — cross with all surrogates
+    SURROGATE_SENSITIVE = ["ei", "lcb", "thompson"]
+
     surrogates = ["rf_mi", "xgb_mi", "rf_cl_mi", "xgb_cl_mi",
-                   "rf_cl_only", "xgb_cl_only"]
+                  "rf_cl_only", "xgb_cl_only"]
     batch_strategies = ["constant_liar", "kriging_believer"]
     seeds = [42, 123, 456]
 
@@ -812,20 +1013,49 @@ def run_bo_ablation(args):
     all_labels = []
     all_summaries = []
 
-    # Sequential ablation
-    for acq in acquisitions:
+    # ── 1. Surrogate-agnostic acquisitions ────────────────────────────────────
+    # pi_ordinal uses a separate classifier pipeline, fit once here.
+    pi_classifier = None
+    from models import make_rf_pipe as _make_rf_pipe
+    rf_params = ck_params.get("best_rf_mi_params", {
+        "n_estimators": 300, "max_depth": 10,
+        "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"})
+    pi_classifier = _make_rf_pipe(rf_params, with_cl=False)
+    pi_classifier.fit(X_cv, y_remapped)
+    print(f"\n── Surrogate-agnostic acquisitions (fixed surrogate: {args.bo_surrogate}) ──")
+
+    for acq in SURROGATE_AGNOSTIC:
+        surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
+        clf = pi_classifier if acq == "pi_ordinal" else None
+        for seed in seeds:
+            label = f"{acq}|seed={seed}"
+            print(f"\n── {label} ──")
+            bo = BOLoop(
+                surrogate=surrogate,
+                acquisition_name=acq,
+                n_iterations=args.bo_iterations,
+                classifier_pipeline=clf,
+                random_state=seed,
+                bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+            )
+            history = bo.run_simulation(X_cv, y_raw)
+            metrics = SimulationMetrics(y_raw)
+            summary = metrics.summary(history)
+            all_histories.append(history)
+            all_labels.append(label)
+            all_summaries.append((label, summary))
+            print(f"  AF={summary['AF']:.2f}  EF={summary['EF']:.2f}  "
+                  f"Top-5%={summary['Top_percent_final']*100:.1f}%")
+
+    # ── 2. Surrogate-sensitive acquisitions ───────────────────────────────────
+    print(f"\n── Surrogate-sensitive acquisitions (EI / LCB / Thompson) ──")
+
+    # Track one history per surrogate (seed=42, ei) for calibration later
+    calibration_histories = {}
+
+    for acq in SURROGATE_SENSITIVE:
         for surr_name in surrogates:
             surrogate = _resolve_surrogate(surr_name, ck_params)
-
-            classifier_pipeline = None
-            if acq == "pi_ordinal":
-                from models import make_rf_pipe
-                rf_params = ck_params.get("best_rf_mi_params", {
-                    "n_estimators": 300, "max_depth": 10,
-                    "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"})
-                classifier_pipeline = make_rf_pipe(rf_params, with_cl=False)
-                classifier_pipeline.fit(X_cv, y_remapped)
-
             for seed in seeds:
                 label = f"{acq}|{surr_name}|seed={seed}"
                 print(f"\n── {label} ──")
@@ -833,53 +1063,127 @@ def run_bo_ablation(args):
                     surrogate=surrogate,
                     acquisition_name=acq,
                     n_iterations=args.bo_iterations,
-                    classifier_pipeline=classifier_pipeline,
                     random_state=seed,
+                    bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
                 )
                 history = bo.run_simulation(X_cv, y_raw)
                 metrics = SimulationMetrics(y_raw)
                 summary = metrics.summary(history)
-
                 all_histories.append(history)
                 all_labels.append(label)
                 all_summaries.append((label, summary))
                 print(f"  AF={summary['AF']:.2f}  EF={summary['EF']:.2f}  "
                       f"Top-5%={summary['Top_percent_final']*100:.1f}%")
 
-    # Batch comparison (best acquisition only)
-    print("\n── Batch strategy comparison ──")
-    best_acq = max(
-        [(l, s) for l, s in all_summaries if "seed=42" in l],
-        key=lambda x: x[1]["AF"],
-    )[0].split("|")[0]
+                # Keep seed=42 EI run per surrogate for calibration reference
+                if acq == "ei" and seed == 42:
+                    calibration_histories[surr_name] = history
 
+    # ── 3. Batch strategy comparison ──────────────────────────────────────────
+    # Pick best acquisition by mean AF across seeds (from agnostic + sensitive)
+    print("\n── Batch strategy comparison ──")
+    acq_af = {}
+    for label, summary in all_summaries:
+        acq_name = label.split("|")[0]
+        acq_af.setdefault(acq_name, []).append(summary["AF"])
+    best_acq = max(acq_af, key=lambda a: np.mean(acq_af[a]))
+    print(f"  Best acquisition by mean AF: {best_acq}")
+
+    # For batch, use args.bo_surrogate (sensible for both BORE and sensitive acqs)
     for strat in batch_strategies:
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
+        clf = pi_classifier if best_acq == "pi_ordinal" else None
         bo = BOLoop(
             surrogate=surrogate,
             acquisition_name=best_acq,
             batch_strategy=strat,
             batch_size=args.bo_batch_size,
             n_iterations=args.bo_iterations,
+            classifier_pipeline=clf,
             random_state=RANDOM_STATE,
+            bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
         )
         history = bo.run_batch(X_cv, y_raw)
-        label = f"batch_{best_acq}_{strat}"
+        label = f"batch|{best_acq}|{strat}"
         all_histories.append(history)
         all_labels.append(label)
         metrics = SimulationMetrics(y_raw)
         all_summaries.append((label, metrics.summary(history)))
 
-    # Plots
-    plot_convergence(all_histories, all_labels, y_raw,
-                     save_path="docs/bo_ablation_convergence.png")
-    plot_topk_curves(all_histories, all_labels, y_raw,
-                     save_path="docs/bo_ablation_topk.png")
-    plot_af_ef_comparison(all_summaries, save_path="docs/bo_ablation_af_ef.png")
+    # ── 4. Plots ──────────────────────────────────────────────────────────────
+    # Split into agnostic / sensitive subsets for per-group raw plots
+    agnostic_mask  = [l.split("|")[0] in SURROGATE_AGNOSTIC  for l in all_labels]
+    sensitive_mask = [l.split("|")[0] in SURROGATE_SENSITIVE for l in all_labels]
+
+    h_agnostic  = [h for h, m in zip(all_histories, agnostic_mask)  if m]
+    l_agnostic  = [l for l, m in zip(all_labels,   agnostic_mask)  if m]
+    h_sensitive = [h for h, m in zip(all_histories, sensitive_mask) if m]
+    l_sensitive = [l for l, m in zip(all_labels,   sensitive_mask) if m]
+
+    # ── Primary comparison figures (seed-aggregated, readable) ────────────────
+    # 1. Mean ± std AF / EF / Top-5% per method — the main summary chart
+    plot_seed_aggregated_comparison(
+        all_summaries,
+        save_path="docs/bo_ablation_seed_aggregated.png",
+    )
+
+    # 2. Heatmap: acquisition × surrogate mean AF and EF
+    plot_sensitive_heatmap(
+        all_summaries, sensitive_acquisitions=SURROGATE_SENSITIVE,
+        metric="AF", save_path="docs/bo_ablation_heatmap_AF.png",
+    )
+    plot_sensitive_heatmap(
+        all_summaries, sensitive_acquisitions=SURROGATE_SENSITIVE,
+        metric="EF", save_path="docs/bo_ablation_heatmap_EF.png",
+    )
+
+    # 3. Seed-averaged convergence bands — one shaded line per unique method
+    plot_seed_averaged_convergence(
+        all_histories, all_labels, y_raw, metric="avg_score",
+        save_path="docs/bo_ablation_convergence_bands.png",
+    )
+    plot_seed_averaged_convergence(
+        all_histories, all_labels, y_raw, metric="simple_regret",
+        save_path="docs/bo_ablation_regret_bands.png",
+    )
+
+    # ── Per-group raw plots (all individual seed runs) ─────────────────────────
+    plot_topk_curves(h_agnostic, l_agnostic, y_raw,
+                     save_path="docs/bo_ablation_topk_agnostic.png")
+    plot_topk_curves(h_sensitive, l_sensitive, y_raw,
+                     save_path="docs/bo_ablation_topk_sensitive.png")
+
+    # ── Results CSV ───────────────────────────────────────────────────────────
     results_df = save_simulation_results(all_histories, all_labels, y_raw,
                                          save_path="docs/bo_ablation_results.csv")
     print(f"\n── Ablation complete. {len(all_summaries)} runs. ──")
     print(results_df.to_string(index=False))
+
+    # ── 5. Surrogate calibration ───────────────────────────────────────────────
+    # Evaluate each surrogate using its seed=42 EI init split — EI is the most
+    # relevant reference since it directly relies on sigma.
+    print("\n── Surrogate Calibration Summary ──")
+    for surr_name in surrogates:
+        surrogate = _resolve_surrogate(surr_name, ck_params)
+        ref_history = calibration_histories.get(surr_name)
+        if ref_history is None:
+            print(f"  {surr_name}: no reference history found, skipping")
+            continue
+        init_idx = np.array(ref_history["init_indices"])
+        pool_idx = np.array(ref_history["pool_indices"])
+        surrogate.fit(X_cv[init_idx], y_raw[init_idx])
+        cal = compute_surrogate_calibration(surrogate, X_cv[pool_idx], y_raw[pool_idx])
+        if "error" in cal:
+            print(f"  {surr_name}: {cal['error']}")
+        else:
+            print(
+                f"  {surr_name}: z_mean={cal['mean_z']:+.2f}  z_std={cal['std_z']:.2f}  "
+                f"1σ_cov={cal['fraction_within_1sigma']*100:.0f}%  "
+                f"2σ_cov={cal['fraction_within_2sigma']*100:.0f}%  "
+                f"cal_err={cal['calibration_error']:.3f}"
+            )
+            plot_calibration(cal, surrogate_name=surr_name,
+                             save_path=f"docs/bo_ablation_calibration_{surr_name}.png")
 
 
 if __name__ == "__main__":
@@ -900,8 +1204,12 @@ if __name__ == "__main__":
                                  "rf_cl_only", "xgb_cl_only"],
                         help="BO regression surrogate (matches classification pipeline variants)")
     parser.add_argument("--bo-acquisition", type=str, default=BO_DEFAULT_ACQUISITION,
-                        choices=["bore", "ei", "lcb", "pi_ordinal", "thompson", "random"],
-                        help="Acquisition function")
+                        choices=["bore", "lfbo", "lfbo_ssl",
+                                 "ei", "lcb", "pi_ordinal", "thompson", "random"],
+                        help="Acquisition function. "
+                             "bore=original BORE (recovers PI); "
+                             "lfbo=LFBO-EI weighted classifier (Song et al. ICML 2022, recovers EI); "
+                             "lfbo_ssl=LFBO-EI + semi-supervised pseudo-labeling (DRE-BO-SSL 2023).")
     parser.add_argument("--bo-batch-strategy", type=str, default="constant_liar",
                         choices=["constant_liar", "kriging_believer"],
                         help="Batch selection strategy")
@@ -913,6 +1221,14 @@ if __name__ == "__main__":
                         help="Run full BO ablation study")
     parser.add_argument("--bo-include-mlr", action="store_true",
                         help="Include metal_over_linker_ratio as a controllable BO parameter (off by default)")
+    parser.add_argument("--bo-ranking-target", action="store_true",
+                        help="Train surrogate on rank-normalised targets instead of raw 0-9 scores. "
+                             "Better for ordinal objectives where relative ordering matters more "
+                             "than exact magnitude (APL Machine Learning, 2024).")
+    parser.add_argument("--bo-feasibility", action="store_true",
+                        help="Apply synthesis feasibility prior to acquisition scores in recommend "
+                             "mode: penalises candidates with temperature above solvent boiling "
+                             "point (Griffiths et al., Digital Discovery 2022).")
 
     # Classification pipeline options
     parser.add_argument("--skip-tuning", action="store_true",

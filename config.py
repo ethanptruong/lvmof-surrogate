@@ -106,7 +106,7 @@ CL_EMB_DIM        = 64
 CL_MARGIN         = 1.0   # TripletMarginLoss margin
 CL_NEGATIVE_CLASS = 1     # 1 = partial/hard negatives, 0 = amorphous/easy negatives
 RANDOM_STATE      = 42
-CV_NJOBS     = 1   # Windows: XGBoost/RF multiprocessing + joblib causes access violations
+CV_NJOBS     = 1   
 
 # ── ChemBERTa ────────────────────────────────────────────────────────────────
 CHEMBERTA_MODEL = "DeepChem/ChemBERTa-77M-MTR"
@@ -372,7 +372,10 @@ BO_CHECKPOINT_DIR      = "checkpoints/bo"
 BO_EPSILON_GREEDY      = 0.1
 BO_N_LHS_SAMPLES       = 1000
 BO_DEFAULT_SURROGATE   = "rf_cl_mi"
-BO_BOOTSTRAP_M         = 10
+BO_BOOTSTRAP_M         = 50
+BO_BORE_ADAPTIVE_GAMMA = True   # anneal gamma from BO_BORE_GAMMA → 0.10 over the campaign
+BO_SSL_ALPHA           = 0.2    # down-weight factor for pseudo-labeled candidates (DRE-BO-SSL)
+BO_SSL_N_PSEUDO        = 20     # pseudo-labeled candidates added per BORE/LFBO iteration
 
 # Controllable process parameters for BO
 # (total_conc bounds computed at runtime from 5th-95th percentile of training data)
