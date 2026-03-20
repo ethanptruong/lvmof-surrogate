@@ -28,7 +28,7 @@ import pandas as pd
 from scipy.stats import norm
 from sklearn.base import clone
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedShuffleSplit, GroupShuffleSplit
 from xgboost import XGBClassifier, XGBRegressor
 
 from config import (
@@ -52,6 +52,7 @@ from config import (
     BO_BORE_ADAPTIVE_GAMMA,
     BO_SSL_ALPHA,
     BO_SSL_N_PSEUDO,
+    BO_CLUSTER_DIV_LAMBDA,
 )
 from cosmo_features import (
     load_cosmo_index,
@@ -159,6 +160,70 @@ class SolventMixer:
                     compositions.append(self.get_cosmo_vector(b, a, ratio))
 
         return compositions
+
+
+# ─────────────────────────────────────────────────────────────
+# Leakage-free chemistry groups for BO evaluation
+# ─────────────────────────────────────────────────────────────
+
+def compute_chemistry_groups(df, linker_col="smiles_linker_1", min_group_size=20):
+    """Assign each experiment a group label based on linker identity.
+
+    Unlike the KMeans groups (which are fit on UMAP of the entire dataset
+    and leak manifold structure), these groups are intrinsic to the
+    chemistry — they are deterministic properties of the molecule and
+    require zero fitting.  This makes them leakage-free for BO init/pool
+    splitting and evaluation.
+
+    Linkers with fewer than ``min_group_size`` experiments are merged into
+    a single 'rare' group so that every group is large enough for a
+    meaningful 30/70 split.
+
+    Parameters
+    ----------
+    df : DataFrame — the masked experiment dataframe (rows match X_cv)
+    linker_col : str — column containing linker SMILES
+    min_group_size : int — groups smaller than this are merged
+
+    Returns
+    -------
+    groups : np.ndarray int (n,) — group labels starting from 0
+    group_names : list[str] — human-readable label for each group id
+    """
+    linker_ids, uniques = pd.factorize(df[linker_col].fillna("unknown"))
+
+    # Count per linker
+    counts = np.bincount(linker_ids)
+    # Merge small groups
+    rare_mask = counts < min_group_size
+    merged = linker_ids.copy()
+    rare_group = len(uniques)  # new id for merged group
+    for lid in np.where(rare_mask)[0]:
+        merged[linker_ids == lid] = rare_group
+
+    # Re-number to 0..n_groups-1
+    final_ids, final_uniques = pd.factorize(merged)
+
+    # Build readable names
+    group_names = []
+    for uid in final_uniques:
+        if uid == rare_group:
+            n_rare = int(rare_mask.sum())
+            group_names.append(f"rare ({n_rare} linkers)")
+        else:
+            smiles = str(uniques[uid])
+            short = smiles[:30] + "…" if len(smiles) > 30 else smiles
+            group_names.append(short)
+
+    groups = np.asarray(final_ids, dtype=int)
+    n_groups = int(groups.max()) + 1
+    print(f"[BO groups] Chemistry-based grouping: {n_groups} groups "
+          f"(from {len(uniques)} linkers, {int(rare_mask.sum())} merged as rare)")
+    for gid in range(n_groups):
+        print(f"    group {gid}: n={int((groups == gid).sum()):>4d}  "
+              f"{group_names[gid]}")
+
+    return groups, group_names
 
 
 # ─────────────────────────────────────────────────────────────
@@ -604,8 +669,13 @@ class BOREAcquisition:
         Steps:
           1. Get initial P(positive|x) from the LFBO-fitted classifier.
           2. Select the n_pseudo/2 most confident positives and negatives.
-          3. Re-fit the classifier on real observations + down-weighted pseudo-labels.
-          4. Return final acquisition scores from the augmented classifier.
+          3. Exclude pseudo-labeled points from the scoring set to prevent
+             self-reinforcing bias (the classifier would trivially score high
+             on points it was just trained to classify as positive).
+          4. Re-fit the classifier on real observations + down-weighted pseudo-labels.
+          5. Score only the non-pseudo candidates from the augmented classifier,
+             then restore the full-length score array with the initial proba
+             for the pseudo-labeled points.
 
         This prevents the classifier from collapsing to a spike around the
         current best region as more observations accumulate.
@@ -620,10 +690,11 @@ class BOREAcquisition:
         n_pos    = n_pseudo // 2
         n_neg    = n_pseudo - n_pos
 
-        ranked        = np.argsort(p_positive)
+        ranked         = np.argsort(p_positive)
         pseudo_neg_idx = ranked[:n_neg]
         pseudo_pos_idx = ranked[-n_pos:]
         all_pseudo_idx = np.concatenate([pseudo_neg_idx, pseudo_pos_idx])
+        pseudo_set     = set(all_pseudo_idx.tolist())
 
         X_pseudo = X_candidates[all_pseudo_idx]
         y_pseudo = np.concatenate([np.zeros(n_neg), np.ones(n_pos)])
@@ -635,9 +706,15 @@ class BOREAcquisition:
         w_aug = np.concatenate([sample_weight, w_pseudo])
         self.clf.fit(X_aug, y_aug, sample_weight=w_aug)
 
-        # Step 4 — final scores
-        proba_final = self.clf.predict_proba(X_candidates)
-        return proba_final[:, pos_idx]
+        # Step 4 — score non-pseudo candidates with augmented classifier,
+        # keep initial proba for pseudo-labeled points to avoid bias
+        new_pos_idx = list(self.clf.classes_).index(1)
+        scores = p_positive.copy()  # start with initial proba
+        non_pseudo_mask = np.array([i not in pseudo_set for i in range(n_cand)])
+        if non_pseudo_mask.any():
+            proba_final = self.clf.predict_proba(X_candidates[non_pseudo_mask])
+            scores[non_pseudo_mask] = proba_final[:, new_pos_idx]
+        return scores
 
 
 class PIordinalAcquisition:
@@ -1112,24 +1189,36 @@ class NeighborhoodTemplateSelector:
         min_similarity=0.05,
         fp_radius=2,
         fp_nbits=2048,
+        success_threshold=5,
+        hub_strat_threshold=0.85,
     ):
         """
         Parameters
         ----------
-        df_train      : DataFrame — training experiments (rows match X_cv)
-        X_cv          : ndarray (n, d) — full feature matrix from checkpoint
-        X_groups      : list[str] len d — feature group labels per column
-        linker_col    : str — SMILES column for the linker in df_train
-        precursor_col : str — SMILES column for the precursor in df_train
-        score_col     : str — outcome column
-        fp_blend      : float in [0,1] — weight given to Morgan FP similarity
-                        vs chemistry feature cosine similarity (default 0.3).
-                        Lower = trust the surrogate features more.
-        linker_weight : float — weight for linker vs precursor in FP similarity
-        top_k         : int — number of neighbors to return
-        min_similarity: float — minimum combined similarity to include
-        fp_radius     : int — Morgan FP radius (2 = ECFP4)
-        fp_nbits      : int — Morgan FP bit vector length
+        df_train             : DataFrame — training experiments (rows match X_cv)
+        X_cv                 : ndarray (n, d) — full feature matrix from checkpoint
+        X_groups             : list[str] len d — feature group labels per column
+        linker_col           : str — SMILES column for the linker in df_train
+        precursor_col        : str — SMILES column for the precursor in df_train
+        score_col            : str — outcome column
+        fp_blend             : float in [0,1] — weight given to Morgan FP similarity
+                               vs chemistry feature cosine similarity (default 0.3).
+                               Lower = trust the surrogate features more.
+        linker_weight        : float — weight for linker vs precursor in FP similarity
+        top_k                : int — number of neighbors to return
+        min_similarity       : float — minimum combined similarity to include
+        fp_radius            : int — Morgan FP radius (2 = ECFP4)
+        fp_nbits             : int — Morgan FP bit vector length
+        success_threshold    : int — minimum pxrd_score to count as a "success"
+                               for center computation (default 5). Only successes
+                               anchor the trust region center; all hub-matched
+                               experiments inform the spread.
+        hub_strat_threshold  : float — mean pairwise FP similarity threshold above
+                               which hub-element stratification is triggered
+                               (default 0.85). When neighbors are nearly identical
+                               by fingerprint, hub atom becomes the discriminator.
+                               Disabled automatically when FP diversity is high
+                               (e.g. a new linker class with no prior history).
         """
         self.df            = df_train.copy().reset_index(drop=True)
         self.linker_col    = linker_col
@@ -1142,12 +1231,24 @@ class NeighborhoodTemplateSelector:
         self.min_similarity = min_similarity
         self.fp_radius = fp_radius
         self.fp_nbits  = fp_nbits
+        self.success_threshold   = success_threshold
+        self.hub_strat_threshold = hub_strat_threshold
 
         # ── Stage 1: pre-compute Morgan fingerprints ──────────────────────────
         self._linker_fps    = [self._to_fp(s) for s in
                                df_train[linker_col].fillna("")]
         self._precursor_fps = [self._to_fp(s) for s in
                                df_train[precursor_col].fillna("")]
+
+        # ── Hub element pre-computation ────────────────────────────────────────
+        self._hub_elements = [
+            self._detect_hub(s) for s in df_train[linker_col].fillna("")
+        ]
+        hub_counts = {}
+        for h in self._hub_elements:
+            hub_counts[h] = hub_counts.get(h, 0) + 1
+        print(f"[NeighborhoodTemplate] Hub distribution in training data: "
+              + ", ".join(f"{k}={v}" for k, v in sorted(hub_counts.items())))
 
         # ── Stage 2: build L2-normalised chemistry feature matrix ─────────────
         # Exclude process / interaction / unknown columns so similarity is
@@ -1200,6 +1301,49 @@ class NeighborhoodTemplateSelector:
         """Cosine similarity between experiment ref_idx and all others."""
         ref = self._X_chem_normed[ref_idx]          # shape (n_chem,)
         return self._X_chem_normed @ ref             # shape (n,)
+
+    @staticmethod
+    def _detect_hub(smiles):
+        """Detect the hub atom/group from a linker SMILES.
+
+        Checks for Group 14 heteroatoms first (unambiguous), then the
+        adamantane cage (tricyclic carbon scaffold), then defaults to 'C'.
+
+        Returns one of: 'Sn', 'Ge', 'Si', 'adamantane', 'C', 'unknown'
+        """
+        try:
+            from rdkit import Chem
+            mol = Chem.MolFromSmiles(str(smiles))
+            if mol is None:
+                return "unknown"
+            atomic_nums = {atom.GetAtomicNum() for atom in mol.GetAtoms()}
+            if 50 in atomic_nums:   # Sn
+                return "Sn"
+            if 32 in atomic_nums:   # Ge
+                return "Ge"
+            if 14 in atomic_nums:   # Si
+                return "Si"
+            # Adamantane cage: tricyclic bridged carbon scaffold
+            adm = Chem.MolFromSmarts("C1C2CC3CC1CC(C2)C3")
+            if adm and mol.HasSubstructMatch(adm):
+                return "adamantane"
+            return "C"
+        except Exception:
+            return "unknown"
+
+    def _mean_pairwise_fp_sim(self, indices):
+        """Mean pairwise Tanimoto FP similarity among a set of linker indices."""
+        from rdkit.DataStructs import TanimotoSimilarity
+        fps = [self._linker_fps[i] for i in indices
+               if self._linker_fps[i] is not None]
+        if len(fps) < 2:
+            return 0.0
+        total, count = 0.0, 0
+        for i in range(len(fps)):
+            for j in range(i + 1, len(fps)):
+                total += TanimotoSimilarity(fps[i], fps[j])
+                count += 1
+        return total / count if count > 0 else 0.0
 
     # ── main ──────────────────────────────────────────────────────────────────
 
@@ -1270,20 +1414,77 @@ class NeighborhoodTemplateSelector:
             return None, None, None, ref_idx
 
         sim_df = sim_df.nlargest(self.top_k, "combined_sim").copy()
+        sim_df["hub_elem"] = [self._hub_elements[i] for i in sim_df.index]
 
-        # Weight = combined_sim × (score + 1)
-        sim_df["weight"] = sim_df["combined_sim"] * (sim_df["score"] + 1.0)
-        if sim_df["weight"].sum() <= 0:
-            sim_df["weight"] = 1.0
+        # ── Hub element stratification (auto-triggered) ────────────────────────
+        # When all top-k neighbors look nearly identical by Morgan FP (typical
+        # for phosphine linker datasets where only the hub atom changes), FP
+        # similarity can no longer discriminate hub types.  We detect this by
+        # measuring mean pairwise FP similarity among the neighbors: if it
+        # exceeds hub_strat_threshold, stratify by hub element so that Sn
+        # experiments inform the Sn center, Si inform the Si center, etc.
+        target_hub    = self._detect_hub(target_linker_smiles)
+        mean_pair_sim = self._mean_pairwise_fp_sim(list(sim_df.index))
+        stratify      = mean_pair_sim >= self.hub_strat_threshold
+
+        if stratify:
+            hub_matched = sim_df[sim_df["hub_elem"] == target_hub]
+            if len(hub_matched) >= 2:
+                print(f"[NeighborhoodTemplate] Hub stratification ACTIVE "
+                      f"(mean_pair_fp={mean_pair_sim:.3f} ≥ {self.hub_strat_threshold}) | "
+                      f"target_hub={target_hub} | "
+                      f"{len(hub_matched)}/{len(sim_df)} hub-matched neighbors")
+                spread_pool = hub_matched          # spread = uncertainty within hub class
+            else:
+                print(f"[NeighborhoodTemplate] Hub stratification triggered "
+                      f"(mean_pair_fp={mean_pair_sim:.3f}) but only "
+                      f"{len(hub_matched)} {target_hub}-hub experiments found — "
+                      "falling back to all neighbors")
+                hub_matched = sim_df
+                spread_pool = sim_df
+        else:
+            print(f"[NeighborhoodTemplate] Hub stratification OFF "
+                  f"(mean_pair_fp={mean_pair_sim:.3f} < {self.hub_strat_threshold})")
+            hub_matched = sim_df
+            spread_pool = sim_df
+
+        # ── Success-only center ────────────────────────────────────────────────
+        # Anchor the trust region center only on successful experiments
+        # (score >= success_threshold) to avoid pulling the starting point
+        # toward failure conditions.  All hub-matched experiments inform the
+        # spread (wider spread = more uncertainty = larger trust region).
+        success_pool = hub_matched[
+            hub_matched["score"] >= self.success_threshold
+        ]
+        if len(success_pool) >= 2:
+            center_pool = success_pool
+            print(f"[NeighborhoodTemplate] Center anchored on "
+                  f"{len(success_pool)} successes (score≥{self.success_threshold})")
+        else:
+            center_pool = hub_matched
+            print(f"[NeighborhoodTemplate] Fewer than 2 successes found — "
+                  "using all hub-matched neighbors for center")
+
+        # ── Weighted center (success pool) and spread (full hub pool) ──────────
+        center_pool = center_pool.copy()
+        center_pool["weight"] = (
+            center_pool["combined_sim"] * (center_pool["score"] + 1.0)
+        )
+        if center_pool["weight"].sum() <= 0:
+            center_pool["weight"] = 1.0
 
         center = {}
         spread = {}
         for param, (lo, hi) in search_bounds.items():
-            vals  = sim_df[param].values.astype(float)
-            w     = sim_df["weight"].values
-            wmean = float(np.average(vals, weights=w))
-            wstd  = float(np.sqrt(np.average((vals - wmean) ** 2, weights=w)))
+            # center: weighted mean over successes
+            vals_c = center_pool[param].values.astype(float)
+            w_c    = center_pool["weight"].values
+            wmean  = float(np.average(vals_c, weights=w_c))
             center[param] = float(np.clip(wmean, lo, hi))
+
+            # spread: std over the full hub-matched pool (includes failures)
+            vals_s = spread_pool[param].values.astype(float)
+            wstd   = float(np.std(vals_s)) if len(vals_s) > 1 else 0.0
             spread[param] = wstd
 
         print(
@@ -1492,7 +1693,9 @@ class BOLoop:
         self.random_state = random_state
         self.bore_adaptive_gamma = bore_adaptive_gamma
 
-    def run_simulation(self, X, y_raw, init_fraction=BO_INIT_FRACTION):
+    def run_simulation(self, X, y_raw, init_fraction=BO_INIT_FRACTION,
+                       groups=None,
+                       cluster_div_lambda=BO_CLUSTER_DIV_LAMBDA):
         """Sequential BO with oracle pool.
 
         Parameters
@@ -1500,6 +1703,18 @@ class BOLoop:
         X : array-like, shape (n, d) — full feature matrix
         y_raw : array-like, shape (n,) — raw 0-9 pxrd_score
         init_fraction : float — fraction for initial training set
+        groups : array-like int (n,), optional — KMeans chemistry cluster labels.
+            When provided, two things happen:
+            1. Init split is stratified by (score, cluster) jointly, guaranteeing
+               every chemistry cluster appears in the initial training set.  This
+               prevents the surrogate from starting blind to entire chemical families
+               (a common source of local-minima trapping on poor random inits).
+            2. A cluster diversity penalty is applied to acquisition scores at each
+               iteration, discouraging consecutive selections from the same cluster.
+               Penalty: acq *= 1 / (1 + lambda * excess_selections / expected)
+               where excess = max(0, actual - expected_per_cluster).
+        cluster_div_lambda : float — strength of diversity penalty (default 2.0).
+            0 disables it; higher values push more aggressively toward unexplored clusters.
 
         Returns
         -------
@@ -1510,13 +1725,93 @@ class BOLoop:
         y_raw = np.asarray(y_raw, dtype=float)
         n = len(y_raw)
 
-        # Stratified init split
-        # Bin y_raw for stratification
         y_binned = np.clip(y_raw.astype(int), 0, 9)
-        sss = StratifiedShuffleSplit(
-            n_splits=1, train_size=init_fraction, random_state=self.random_state
-        )
-        init_idx, pool_idx = next(sss.split(X, y_binned))
+
+        # ── Init split ────────────────────────────────────────────────────────
+        # When chemistry groups are available, take init_fraction of EACH cluster
+        # (score-stratified within the cluster where possible).  This guarantees
+        # every chemistry family is represented in the initial training set while
+        # holding back 70 % of each cluster as the oracle pool.
+        #
+        # Why not GroupShuffleSplit (entire clusters in/out)?  Too extreme — the
+        # surrogate has zero signal from pool clusters, making generalisation
+        # unrealistically hard.  The per-cluster split mirrors the real lab
+        # situation: you have done some experiments with each linker type and
+        # want to know which remaining experiments to run next.
+        #
+        # Why not plain StratifiedShuffleSplit (score only)?  Both init and pool
+        # contain the same chemistry families, so the surrogate can trivially
+        # interpolate within a known cluster → inflated AF/EF.
+        if groups is not None:
+            groups = np.asarray(groups, dtype=int)
+            n_clusters = int(groups.max()) + 1
+
+            init_list, pool_list = [], []
+            for cid in range(n_clusters):
+                c_idx = np.where(groups == cid)[0]
+                if len(c_idx) < 2:
+                    # Cluster too small to split — put entirely in init
+                    init_list.extend(c_idx.tolist())
+                    continue
+                y_c = y_binned[c_idx]
+                try:
+                    sss_c = StratifiedShuffleSplit(
+                        n_splits=1, train_size=init_fraction,
+                        random_state=self.random_state
+                    )
+                    i_init, i_pool = next(sss_c.split(c_idx, y_c))
+                except ValueError:
+                    # Score stratification failed — random split within cluster
+                    rng_c = np.random.RandomState(self.random_state + cid)
+                    perm = rng_c.permutation(len(c_idx))
+                    n_init = max(1, int(len(c_idx) * init_fraction))
+                    i_init, i_pool = perm[:n_init], perm[n_init:]
+                init_list.extend(c_idx[i_init].tolist())
+                pool_list.extend(c_idx[i_pool].tolist())
+
+            init_idx = np.array(init_list, dtype=int)
+            pool_idx = np.array(pool_list, dtype=int)
+
+            # Diagnostics per cluster
+            print(f"[BO simulation] Per-cluster stratified split "
+                  f"({init_fraction:.0%} init / {1 - init_fraction:.0%} pool "
+                  f"from each of {n_clusters} clusters):")
+            for cid in range(n_clusters):
+                n_init_c = int((groups[init_idx] == cid).sum())
+                n_pool_c = int((groups[pool_idx] == cid).sum())
+                print(f"    cluster {cid}: init={n_init_c}  pool={n_pool_c}")
+            print(f"  Total: init={len(init_idx)}  pool={len(pool_idx)}")
+        else:
+            groups     = None
+            n_clusters = None
+            sss = StratifiedShuffleSplit(
+                n_splits=1, train_size=init_fraction,
+                random_state=self.random_state
+            )
+            init_idx, pool_idx = next(sss.split(X, y_binned))
+            print("[BO simulation] No chemistry groups — using score-stratified split.")
+
+        return self._run_loop(X, y_raw, init_idx, pool_idx,
+                              groups=groups, n_clusters=n_clusters,
+                              cluster_div_lambda=cluster_div_lambda)
+
+    # ── Core BO loop (shared by run_simulation and run_simulation_loco) ────
+
+    def _run_loop(self, X, y_raw, init_idx, pool_idx, *,
+                  groups=None, n_clusters=None, cluster_div_lambda=0.0,
+                  quiet=False):
+        """Execute the sequential BO loop given pre-computed init/pool splits.
+
+        Parameters
+        ----------
+        X, y_raw          : full feature matrix and raw scores
+        init_idx, pool_idx: integer arrays of global indices
+        groups             : optional cluster labels (int array, len n)
+        n_clusters         : number of distinct clusters
+        cluster_div_lambda : diversity penalty strength (0 = disabled)
+        quiet              : suppress per-iteration printing
+        """
+        n = len(y_raw)
 
         # Diagnostic
         high_count = (y_raw[init_idx] >= 7).sum()
@@ -1528,31 +1823,35 @@ class BOLoop:
 
         X_train = X[init_idx].copy()
         y_train = y_raw[init_idx].copy()
-        pool_mask = np.ones(n, dtype=bool)
-        pool_mask[init_idx] = False
+        pool_mask = np.zeros(n, dtype=bool)
+        pool_mask[pool_idx] = True
 
         history = {
             "iterations": [],
             "best_so_far": [],
             "selected_indices": [],
             "y_selected": [],
-            "init_indices": init_idx.tolist(),
-            "pool_indices": pool_idx.tolist(),
+            "init_indices": init_idx.tolist() if hasattr(init_idx, 'tolist') else list(init_idx),
+            "pool_indices": pool_idx.tolist() if hasattr(pool_idx, 'tolist') else list(pool_idx),
         }
 
-        f_best = y_train.max()
-        print(f"[BO simulation] init={len(init_idx)}, pool={pool_mask.sum()}, "
-              f"f_best_init={f_best:.1f}")
+        f_best = float(y_train.max()) if len(y_train) > 0 else 0.0
+        n_iters = min(self.n_iterations, int(pool_mask.sum()))
+        if not quiet:
+            print(f"[BO simulation] init={len(init_idx)}, pool={pool_mask.sum()}, "
+                  f"f_best_init={f_best:.1f}")
 
-        for it in range(self.n_iterations):
+        from collections import Counter
+        cluster_counts = Counter()
+
+        for it in range(n_iters):
             remaining = np.where(pool_mask)[0]
             if len(remaining) == 0:
-                print(f"[BO] Pool exhausted at iteration {it}")
+                if not quiet:
+                    print(f"[BO] Pool exhausted at iteration {it}")
                 break
 
-            # Fit surrogate on current training data
             self.surrogate.fit(X_train, y_train)
-
             X_pool = X[remaining]
 
             # Epsilon-greedy exploration
@@ -1570,30 +1869,89 @@ class BOLoop:
                     self.acquisition_name, self.surrogate,
                     X_train, y_train, X_pool, **acq_kwargs
                 )
+
+                # Cluster diversity penalty
+                if groups is not None and cluster_div_lambda > 0 and n_clusters:
+                    total_selected = max(len(history["selected_indices"]), 1)
+                    expected = total_selected / n_clusters
+                    penalties = np.ones(len(remaining))
+                    for j, idx in enumerate(remaining):
+                        k = int(groups[idx])
+                        excess = max(0.0, cluster_counts[k] - expected)
+                        penalties[j] = 1.0 / (
+                            1.0 + cluster_div_lambda * excess / (expected + 1e-9)
+                        )
+                    acq_vals = acq_vals * penalties
+
                 sel_local = np.argmax(acq_vals)
 
             sel_global = remaining[sel_local]
             oracle_y = y_raw[sel_global]
 
-            # Update
             X_train = np.vstack([X_train, X[sel_global:sel_global+1]])
             y_train = np.append(y_train, oracle_y)
             pool_mask[sel_global] = False
             f_best = max(f_best, oracle_y)
+
+            if groups is not None:
+                cluster_counts[int(groups[sel_global])] += 1
 
             history["iterations"].append(it)
             history["best_so_far"].append(f_best)
             history["selected_indices"].append(int(sel_global))
             history["y_selected"].append(float(oracle_y))
 
-            if (it + 1) % 10 == 0:
-                print(f"  iter {it+1:3d}/{self.n_iterations} | "
+            if not quiet and (it + 1) % 10 == 0:
+                print(f"  iter {it+1:3d}/{n_iters} | "
                       f"selected y={oracle_y:.0f} | f_best={f_best:.0f} | "
                       f"pool={pool_mask.sum()}")
 
         return history
 
-    def run_batch(self, X, y_raw, init_fraction=BO_INIT_FRACTION):
+    def run_simulation_loco(self, X, y_raw, groups, held_out_cluster,
+                            max_pool_frac=0.30):
+        """Leave-one-cluster-out BO simulation.
+
+        Init = all experiments from clusters != held_out_cluster.
+        Pool = all experiments from the held-out cluster.
+        Cluster diversity penalty is disabled (irrelevant when pool is
+        a single cluster).
+
+        Parameters
+        ----------
+        max_pool_frac : float — cap iterations at this fraction of the pool
+            size so that small clusters are evaluated under the same budget
+            pressure as large ones (default 0.30 = match the 30/70 split).
+            Without this, a cluster of 25 experiments tested over 50 iterations
+            exhausts the entire pool, inflating Top-5% and AF.
+
+        Returns the same history dict as run_simulation.
+        """
+        X = np.asarray(X, dtype=float)
+        y_raw = np.asarray(y_raw, dtype=float)
+        groups = np.asarray(groups, dtype=int)
+
+        init_idx = np.where(groups != held_out_cluster)[0]
+        pool_idx = np.where(groups == held_out_cluster)[0]
+
+        # Cap iterations to avoid exhausting small pools
+        budget = max(1, int(len(pool_idx) * max_pool_frac))
+        orig_iters = self.n_iterations
+        self.n_iterations = min(self.n_iterations, budget)
+
+        print(f"[LOCO] Held-out cluster {held_out_cluster}: "
+              f"init={len(init_idx)} (other clusters), "
+              f"pool={len(pool_idx)} (cluster {held_out_cluster}), "
+              f"budget={self.n_iterations} iters "
+              f"({max_pool_frac:.0%} of pool)")
+
+        history = self._run_loop(X, y_raw, init_idx, pool_idx,
+                                 groups=None, n_clusters=None,
+                                 cluster_div_lambda=0.0)
+        self.n_iterations = orig_iters
+        return history
+
+    def run_batch(self, X, y_raw, init_fraction=BO_INIT_FRACTION, groups=None):
         """Batch BO simulation using constant_liar or kriging_believer.
 
         Returns history dict similar to run_simulation but with batch selections.
@@ -1603,10 +1961,39 @@ class BOLoop:
         n = len(y_raw)
 
         y_binned = np.clip(y_raw.astype(int), 0, 9)
-        sss = StratifiedShuffleSplit(
-            n_splits=1, train_size=init_fraction, random_state=self.random_state
-        )
-        init_idx, pool_idx = next(sss.split(X, y_binned))
+        if groups is not None:
+            groups = np.asarray(groups, dtype=int)
+            n_clusters = int(groups.max()) + 1
+            init_list, pool_list = [], []
+            for cid in range(n_clusters):
+                c_idx = np.where(groups == cid)[0]
+                if len(c_idx) < 2:
+                    init_list.extend(c_idx.tolist())
+                    continue
+                y_c = y_binned[c_idx]
+                try:
+                    sss_c = StratifiedShuffleSplit(
+                        n_splits=1, train_size=init_fraction,
+                        random_state=self.random_state
+                    )
+                    i_init, i_pool = next(sss_c.split(c_idx, y_c))
+                except ValueError:
+                    rng_c = np.random.RandomState(self.random_state + cid)
+                    perm = rng_c.permutation(len(c_idx))
+                    n_init = max(1, int(len(c_idx) * init_fraction))
+                    i_init, i_pool = perm[:n_init], perm[n_init:]
+                init_list.extend(c_idx[i_init].tolist())
+                pool_list.extend(c_idx[i_pool].tolist())
+            init_idx = np.array(init_list, dtype=int)
+            pool_idx = np.array(pool_list, dtype=int)
+            print(f"[BO batch] Per-cluster stratified split: "
+                  f"init={len(init_idx)} pool={len(pool_idx)} "
+                  f"({n_clusters} clusters)")
+        else:
+            sss = StratifiedShuffleSplit(
+                n_splits=1, train_size=init_fraction, random_state=self.random_state
+            )
+            init_idx, pool_idx = next(sss.split(X, y_binned))
 
         X_train = X[init_idx].copy()
         y_train = y_raw[init_idx].copy()

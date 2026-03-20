@@ -361,13 +361,13 @@ _COORD_KEYS = ["COOH", "COO_neg", "py_N", "amine_prim",
                "phosphonate", "sulfonate"]
 
 # ── Bayesian Optimization ────────────────────────────────────────────────────
-BO_DEFAULT_ACQUISITION = "bore"
+BO_DEFAULT_ACQUISITION = "lfbo"
 BO_BORE_GAMMA          = 0.25
 BO_LCB_KAPPA           = 2.0
 BO_EI_XI               = 0.01
 BO_N_ITERATIONS        = 50
 BO_BATCH_SIZE          = 3
-BO_INIT_FRACTION       = 0.40
+BO_INIT_FRACTION       = 0.30
 BO_CHECKPOINT_DIR      = "checkpoints/bo"
 BO_EPSILON_GREEDY      = 0.1
 BO_N_LHS_SAMPLES       = 1000
@@ -376,6 +376,8 @@ BO_BOOTSTRAP_M         = 50
 BO_BORE_ADAPTIVE_GAMMA = True   # anneal gamma from BO_BORE_GAMMA → 0.10 over the campaign
 BO_SSL_ALPHA           = 0.2    # down-weight factor for pseudo-labeled candidates (DRE-BO-SSL)
 BO_SSL_N_PSEUDO        = 20     # pseudo-labeled candidates added per BORE/LFBO iteration
+BO_CLUSTER_DIV_LAMBDA  = 2.0    # strength of chemistry-cluster diversity penalty (simulation only)
+                                 # 0 = disabled; higher = stronger push toward unexplored clusters
 
 # Controllable process parameters for BO
 # (total_conc bounds computed at runtime from 5th-95th percentile of training data)

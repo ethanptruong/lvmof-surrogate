@@ -603,17 +603,26 @@ def run_bo(args):
 
     checkpointer = BOCheckpointer()
 
+    from bo_core import compute_chemistry_groups
+    groups, group_names = compute_chemistry_groups(df_merged)
+
     if args.bo_mode == "simulate":
         print(f"\n── Simulation: {args.bo_acquisition} | {args.bo_surrogate} "
               f"| {args.bo_iterations} iters ──")
-        history = bo.run_simulation(X_cv, y_raw, init_fraction=BO_INIT_FRACTION)
+        history = bo.run_simulation(X_cv, y_raw, init_fraction=BO_INIT_FRACTION,
+                                    groups=groups)
         metrics = SimulationMetrics(y_raw)
         summary = metrics.summary(history)
+
+        # Hit rate vs baseline
+        y_sel = y_raw[history["selected_indices"]]
+        hit_rate = float((y_sel >= 7).mean()) if len(y_sel) > 0 else 0.0
+        baseline_hit = float((y_raw >= 7).mean())
 
         print(f"\n── Results ──")
         print(f"  AF:           {summary['AF']:.2f}")
         print(f"  EF:           {summary['EF']:.2f}")
-        print(f"  Top-5% found: {summary['Top_percent_final']*100:.1f}%")
+        print(f"  Hit rate:     {hit_rate*100:.1f}%  (baseline: {baseline_hit*100:.1f}%)")
         print(f"  Best score:   {summary['best_score_final']:.0f}")
         print(f"  Simple regret (final): {summary['simple_regret_final']:.2f}")
 
@@ -658,14 +667,18 @@ def run_bo(args):
     elif args.bo_mode == "batch":
         print(f"\n── Batch simulation: {args.bo_acquisition} | {args.bo_surrogate} "
               f"| batch_size={args.bo_batch_size} | {args.bo_batch_strategy} ──")
-        history = bo.run_batch(X_cv, y_raw, init_fraction=BO_INIT_FRACTION)
+        history = bo.run_batch(X_cv, y_raw, init_fraction=BO_INIT_FRACTION, groups=groups)
         metrics = SimulationMetrics(y_raw)
         summary = metrics.summary(history)
+
+        y_sel = y_raw[history["selected_indices"]]
+        hit_rate = float((y_sel >= 7).mean()) if len(y_sel) > 0 else 0.0
+        baseline_hit = float((y_raw >= 7).mean())
 
         print(f"\n── Results ──")
         print(f"  AF:          {summary['AF']:.2f}")
         print(f"  EF:          {summary['EF']:.2f}")
-        print(f"  Top-5% found: {summary['Top_percent_final']*100:.1f}%")
+        print(f"  Hit rate:    {hit_rate*100:.1f}%  (baseline: {baseline_hit*100:.1f}%)")
         print(f"  Best score:   {summary['best_score_final']:.0f}")
 
         label = f"batch_{args.bo_acquisition}_{args.bo_surrogate}_{args.bo_batch_strategy}"
@@ -676,8 +689,424 @@ def run_bo(args):
         _run_recommend(args)
         return
 
+    elif args.bo_mode == "evaluate":
+        _run_evaluate(args)
+        return
+
+    elif args.bo_mode == "loco":
+        _run_loco(args)
+        return
+
+    elif args.bo_mode == "learning-curve":
+        _run_learning_curve(args)
+        return
+
     else:
         raise ValueError(f"Unknown --bo-mode: {args.bo_mode}")
+
+
+def _run_evaluate(args):
+    """Multi-seed per-cluster BO evaluation.
+
+    Runs the BO simulation with N different random seeds, computing per-cluster
+    AF/EF/Top-5% for each run.  Reports mean ± std across seeds per cluster
+    and aggregate, and generates grouped bar charts.
+    """
+    from bo_core import BOLoop
+    from bo_metrics import (SimulationMetrics, plot_per_cluster_bar,
+                            plot_evaluate_hit_rate, save_simulation_results,
+                            plot_convergence, plot_average_score,
+                            plot_topk_curves, plot_simple_regret,
+                            save_full_history, compute_surrogate_calibration,
+                            plot_calibration)
+
+    print("\n" + "=" * 70)
+    print("  BO EVALUATION (multi-seed, per-cluster)")
+    print("=" * 70)
+
+    X_cv, y_raw, y_remapped, df_merged, mask = _load_bo_data(args.data)
+    ck_params = _load(PARAMS_CKPT) or {}
+    from bo_core import compute_chemistry_groups
+    groups, group_names = compute_chemistry_groups(df_merged)
+    n_clusters = int(groups.max()) + 1
+
+    seeds = [42 + i * 111 for i in range(args.bo_eval_seeds)]
+    print(f"  Seeds: {seeds}")
+    print(f"  Clusters: {n_clusters}")
+    print(f"  Acquisition: {args.bo_acquisition} | Surrogate: {args.bo_surrogate}")
+
+    all_cluster_stats = []   # list of per_cluster_summary dicts
+    all_summaries = []       # list of aggregate summary dicts
+    all_histories = []       # for convergence plots
+    first_surrogate = None   # for calibration (first seed only)
+
+    for i_seed, seed in enumerate(seeds):
+        print(f"\n── Seed {seed} ──")
+        surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
+                                       ranking_target=args.bo_ranking_target)
+
+        # Classifier pipeline for pi_ordinal
+        clf = None
+        if args.bo_acquisition == "pi_ordinal":
+            from models import make_rf_pipe
+            rf_params = ck_params.get("best_rf_mi_params", {
+                "n_estimators": 300, "max_depth": 10,
+                "min_samples_split": 5, "min_samples_leaf": 3,
+                "max_features": "sqrt"})
+            clf = make_rf_pipe(rf_params, with_cl=False)
+            clf.fit(X_cv, y_remapped)
+
+        bo = BOLoop(
+            surrogate=surrogate,
+            acquisition_name=args.bo_acquisition,
+            n_iterations=args.bo_iterations,
+            classifier_pipeline=clf,
+            random_state=seed,
+            bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+        )
+        history = bo.run_simulation(X_cv, y_raw, groups=groups)
+
+        metrics = SimulationMetrics(y_raw)
+        summary = metrics.summary(history)
+        cluster_stats = metrics.per_cluster_summary(history, groups)
+
+        all_summaries.append(summary)
+        all_cluster_stats.append(cluster_stats)
+        all_histories.append(history)
+        if i_seed == 0:
+            first_surrogate = surrogate
+
+        # Hit rate for per-seed printout
+        y_sel = y_raw[history["selected_indices"]]
+        hit = float((y_sel >= 7).mean()) if len(y_sel) > 0 else 0.0
+        baseline = float((y_raw >= 7).mean())
+        print(f"  AF={summary['AF']:.2f}  EF={summary['EF']:.2f}  "
+              f"Hit={hit*100:.1f}% (base={baseline*100:.1f}%)")
+
+    # ── Aggregate results ──────────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("  EVALUATION SUMMARY (mean ± std across seeds)")
+    print("=" * 70)
+
+    # Per-cluster table
+    header = (f"{'Cluster':>8}  {'AF':>12}  {'EF':>12}  "
+              f"{'Hit%':>12}  {'Base%':>8}  {'n_pool':>6}")
+    print(header)
+    print("-" * len(header))
+
+    for cid in range(n_clusters):
+        afs   = [s[cid]["AF"]           for s in all_cluster_stats if cid in s]
+        efs   = [s[cid]["EF"]           for s in all_cluster_stats if cid in s]
+        hits  = [s[cid]["hit_rate"]     for s in all_cluster_stats if cid in s]
+        bases = [s[cid]["baseline_hit"] for s in all_cluster_stats if cid in s]
+        n_pool = all_cluster_stats[0][cid]["n_pool"] if cid in all_cluster_stats[0] else 0
+        print(f"{'C' + str(cid):>8}  "
+              f"{np.mean(afs):>5.2f}±{np.std(afs):<5.2f}  "
+              f"{np.mean(efs):>5.2f}±{np.std(efs):<5.2f}  "
+              f"{np.mean(hits)*100:>5.1f}±{np.std(hits)*100:<4.1f}%  "
+              f"{np.mean(bases)*100:>6.1f}%  "
+              f"{n_pool:>6d}")
+
+    agg_afs  = [s["AF"] for s in all_summaries]
+    agg_efs  = [s["EF"] for s in all_summaries]
+    print("-" * len(header))
+    print(f"{'Agg':>8}  "
+          f"{np.mean(agg_afs):>5.2f}±{np.std(agg_afs):<5.2f}  "
+          f"{np.mean(agg_efs):>5.2f}±{np.std(agg_efs):<5.2f}")
+
+    # ── Per-cluster bar charts ───────────────────────────────────────────
+    for metric in ["AF", "EF"]:
+        plot_per_cluster_bar(all_cluster_stats, metric=metric)
+    plot_evaluate_hit_rate(all_cluster_stats)
+
+    # ── Convergence & diagnostic plots (all seeds overlaid) ───────────
+    label = f"{args.bo_acquisition}_{args.bo_surrogate}"
+    seed_labels = [f"seed_{s}" for s in seeds]
+    plot_convergence(all_histories, seed_labels, y_raw,
+                     save_path=f"docs/bo_convergence_{label}.png")
+    plot_average_score(all_histories, seed_labels,
+                       save_path=f"docs/bo_avg_score_{label}.png")
+    plot_topk_curves(all_histories, seed_labels, y_raw,
+                     save_path=f"docs/bo_topk_{label}.png")
+    plot_simple_regret(all_histories, seed_labels, y_raw,
+                       save_path=f"docs/bo_simple_regret_{label}.png")
+    save_full_history(all_histories[0], label)
+
+    # ── Surrogate calibration (first seed's init/pool split) ──────────
+    print(f"\n── Surrogate Calibration ({args.bo_surrogate}) ──")
+    init_idx = np.array(all_histories[0]["init_indices"])
+    pool_idx = np.array(all_histories[0]["pool_indices"])
+    first_surrogate.fit(X_cv[init_idx], y_raw[init_idx])
+    cal = compute_surrogate_calibration(first_surrogate, X_cv[pool_idx], y_raw[pool_idx])
+
+    if "error" in cal:
+        print(f"  WARNING: {cal['error']}")
+    else:
+        print(f"  n_test={cal['n_valid']}, n_zero_sigma={cal['n_zero_sigma']}")
+        print(f"  z-score mean: {cal['mean_z']:+.3f}  (ideal:  0.000)")
+        print(f"  z-score std:  {cal['std_z']:.3f}   (ideal:  1.000)")
+        print(f"  Coverage within 1σ: {cal['fraction_within_1sigma']*100:.1f}%  "
+              f"(expected: 68.3%)")
+        print(f"  Coverage within 2σ: {cal['fraction_within_2sigma']*100:.1f}%  "
+              f"(expected: 95.4%)")
+        print(f"  Mean calibration error: {cal['calibration_error']:.4f}  "
+              f"(0 = perfect)")
+        if cal["calibration_error"] > 0.10:
+            print("  NOTE: calibration error > 0.10 — sigma estimates are "
+                  "unreliable. EI/LCB acquisition scores may be misleading.")
+    plot_calibration(cal, surrogate_name=args.bo_surrogate,
+                     save_path=f"docs/bo_calibration_{label}.png")
+
+
+def _run_loco(args):
+    """Leave-one-cluster-out BO evaluation.
+
+    For each cluster: train on ALL other clusters, use the held-out cluster
+    as the pool.  Tests pure generalization to unseen chemistry.
+    """
+    from bo_core import BOLoop
+    from bo_metrics import SimulationMetrics, plot_loco_bar, plot_loco_hit_rate
+
+    print("\n" + "=" * 70)
+    print("  BO LEAVE-ONE-CLUSTER-OUT (LOCO) EVALUATION")
+    print("=" * 70)
+
+    X_cv, y_raw, y_remapped, df_merged, mask = _load_bo_data(args.data)
+    ck_params = _load(PARAMS_CKPT) or {}
+    from bo_core import compute_chemistry_groups
+    groups, group_names = compute_chemistry_groups(df_merged)
+    n_clusters = int(groups.max()) + 1
+
+    print(f"  Acquisition: {args.bo_acquisition} | Surrogate: {args.bo_surrogate}")
+    print(f"  Clusters: {n_clusters}")
+
+    MIN_POOL_LOCO = 20  # skip clusters too small for meaningful evaluation
+    loco_results = {}
+
+    for cid in range(n_clusters):
+        pool_idx = np.where(groups == cid)[0]
+        if len(pool_idx) < MIN_POOL_LOCO:
+            print(f"\n── Held-out cluster {cid} ── SKIPPED (pool={len(pool_idx)} < {MIN_POOL_LOCO})")
+            continue
+
+        print(f"\n── Held-out cluster {cid} ──")
+        surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
+                                       ranking_target=args.bo_ranking_target)
+
+        clf = None
+        if args.bo_acquisition == "pi_ordinal":
+            from models import make_rf_pipe
+            rf_params = ck_params.get("best_rf_mi_params", {
+                "n_estimators": 300, "max_depth": 10,
+                "min_samples_split": 5, "min_samples_leaf": 3,
+                "max_features": "sqrt"})
+            clf = make_rf_pipe(rf_params, with_cl=False)
+            clf.fit(X_cv, y_remapped)
+
+        bo = BOLoop(
+            surrogate=surrogate,
+            acquisition_name=args.bo_acquisition,
+            n_iterations=args.bo_iterations,
+            classifier_pipeline=clf,
+            random_state=RANDOM_STATE,
+            bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+        )
+        history = bo.run_simulation_loco(X_cv, y_raw, groups, held_out_cluster=cid)
+
+        # Compute metrics on the held-out cluster only
+        y_cluster = y_raw[pool_idx]
+        cluster_metrics = SimulationMetrics(y_cluster)
+
+        # Remap global selected indices → local indices within held-out cluster
+        global_to_local = {g: l for l, g in enumerate(pool_idx)}
+        local_selected = [global_to_local[idx] for idx in history["selected_indices"]
+                          if idx in global_to_local]
+        y_sel = np.array([float(y_raw[idx]) for idx in history["selected_indices"]
+                          if idx in global_to_local])
+        local_history = {
+            "selected_indices": local_selected,
+            "y_selected": y_sel.tolist(),
+            "best_so_far": history["best_so_far"],
+            "init_indices": [],   # no init within this cluster
+        }
+        summary = cluster_metrics.summary(local_history)
+
+        # Hit rate: fraction of BO selections with score >= 7 (crystalline)
+        hit_rate = float((y_sel >= 7).mean()) if len(y_sel) > 0 else 0.0
+        # Baseline hit rate: fraction of cluster with score >= 7
+        baseline_hit = float((y_cluster >= 7).mean())
+
+        loco_results[cid] = {
+            "AF": summary["AF"],
+            "EF": summary["EF"],
+            "Top%": summary["Top_percent_final"],
+            "hit_rate": hit_rate,
+            "baseline_hit": baseline_hit,
+            "n_pool": len(pool_idx),
+            "n_selected": len(local_selected),
+            "best_score": summary["best_score_final"],
+        }
+        print(f"  AF={summary['AF']:.2f}  EF={summary['EF']:.2f}  "
+              f"Top-5%={summary['Top_percent_final']*100:.1f}%  "
+              f"hit_rate={hit_rate*100:.0f}% (baseline={baseline_hit*100:.0f}%)  "
+              f"pool={len(pool_idx)}  selected={len(local_selected)}")
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("  LOCO SUMMARY")
+    print("=" * 70)
+
+    evaluated_cids = sorted(loco_results.keys())
+    skipped = n_clusters - len(evaluated_cids)
+    if skipped:
+        print(f"  ({skipped} cluster(s) skipped: pool < {MIN_POOL_LOCO})")
+
+    header = (f"{'Cluster':>8}  {'AF':>8}  {'EF':>8}  {'Top-5%':>8}  "
+              f"{'Hit%':>6}  {'Base%':>6}  {'n_pool':>6}  {'selected':>8}")
+    print(header)
+    print("-" * len(header))
+    for cid in evaluated_cids:
+        r = loco_results[cid]
+        name = group_names[cid] if cid < len(group_names) else f"C{cid}"
+        print(f"{name[:8]:>8}  {r['AF']:>8.2f}  {r['EF']:>8.2f}  "
+              f"{r['Top%']*100:>7.1f}%  "
+              f"{r['hit_rate']*100:>5.0f}%  {r['baseline_hit']*100:>5.0f}%  "
+              f"{r['n_pool']:>6d}  {r['n_selected']:>8d}")
+
+    # Pool-size weighted mean (more representative than equal-weight)
+    total_pool = sum(loco_results[c]["n_pool"] for c in evaluated_cids)
+    w_af  = sum(loco_results[c]["AF"]  * loco_results[c]["n_pool"] for c in evaluated_cids) / max(total_pool, 1)
+    w_ef  = sum(loco_results[c]["EF"]  * loco_results[c]["n_pool"] for c in evaluated_cids) / max(total_pool, 1)
+    w_top = sum(loco_results[c]["Top%"] * loco_results[c]["n_pool"] for c in evaluated_cids) / max(total_pool, 1)
+    w_hit = sum(loco_results[c]["hit_rate"] * loco_results[c]["n_pool"] for c in evaluated_cids) / max(total_pool, 1)
+    w_base = sum(loco_results[c]["baseline_hit"] * loco_results[c]["n_pool"] for c in evaluated_cids) / max(total_pool, 1)
+    print("-" * len(header))
+    print(f"{'W.Mean':>8}  {w_af:>8.2f}  {w_ef:>8.2f}  "
+          f"{w_top*100:>7.1f}%  {w_hit*100:>5.0f}%  {w_base*100:>5.0f}%")
+
+    # Plots
+    label = f"{args.bo_acquisition}_{args.bo_surrogate}"
+    for metric in ["AF", "EF"]:
+        plot_loco_bar(loco_results, metric=metric,
+                      save_path=f"docs/bo_loco_{metric}_{label}.png")
+    plot_loco_hit_rate(loco_results,
+                       save_path=f"docs/bo_loco_hit_rate_{label}.png")
+
+
+def _run_learning_curve(args):
+    """BO learning curve: sweep init_fraction to find the cold-start budget.
+
+    For each init fraction (5% to 50%), runs multi-seed BO simulation and
+    measures AF/EF/Top-5%.  The resulting plot shows how many initial
+    experiments are needed before the BO becomes useful (AF > ~2).
+    """
+    from bo_core import BOLoop
+    from bo_metrics import SimulationMetrics, plot_learning_curve
+
+    print("\n" + "=" * 70)
+    print("  BO LEARNING CURVE (hit rate vs number of initial experiments)")
+    print("=" * 70)
+
+    X_cv, y_raw, y_remapped, df_merged, mask = _load_bo_data(args.data)
+    ck_params = _load(PARAMS_CKPT) or {}
+    from bo_core import compute_chemistry_groups
+    groups, group_names = compute_chemistry_groups(df_merged)
+
+    # Baseline hit rate: fraction of entire pool with score >= 7 (random guessing)
+    baseline_hit = float((y_raw >= 7).mean())
+    print(f"  Global baseline hit rate (score≥7): {baseline_hit*100:.1f}%")
+
+    init_fractions = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50]
+    seeds = [42 + i * 111 for i in range(args.bo_eval_seeds)]
+
+    print(f"  Acquisition: {args.bo_acquisition} | Surrogate: {args.bo_surrogate}")
+    print(f"  Seeds: {len(seeds)} | Fractions: {init_fractions}")
+
+    lc_results = []
+
+    for frac in init_fractions:
+        seed_afs, seed_efs, seed_hits, seed_ninits = [], [], [], []
+
+        for seed in seeds:
+            surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
+                                           ranking_target=args.bo_ranking_target)
+            clf = None
+            if args.bo_acquisition == "pi_ordinal":
+                from models import make_rf_pipe
+                rf_params = ck_params.get("best_rf_mi_params", {
+                    "n_estimators": 300, "max_depth": 10,
+                    "min_samples_split": 5, "min_samples_leaf": 3,
+                    "max_features": "sqrt"})
+                clf = make_rf_pipe(rf_params, with_cl=False)
+                clf.fit(X_cv, y_remapped)
+
+            bo = BOLoop(
+                surrogate=surrogate,
+                acquisition_name=args.bo_acquisition,
+                n_iterations=args.bo_iterations,
+                classifier_pipeline=clf,
+                random_state=seed,
+                bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+            )
+            history = bo.run_simulation(X_cv, y_raw, init_fraction=frac,
+                                        groups=groups)
+            metrics = SimulationMetrics(y_raw)
+            summary = metrics.summary(history)
+
+            # Hit rate of BO selections
+            y_sel = y_raw[history["selected_indices"]]
+            hit = float((y_sel >= 7).mean()) if len(y_sel) > 0 else 0.0
+
+            seed_afs.append(summary["AF"])
+            seed_efs.append(summary["EF"])
+            seed_hits.append(hit)
+            seed_ninits.append(len(history["init_indices"]))
+
+        result = {
+            "init_frac":     frac,
+            "n_init_mean":   np.mean(seed_ninits),
+            "AF_mean":       np.mean(seed_afs),
+            "AF_std":        np.std(seed_afs),
+            "EF_mean":       np.mean(seed_efs),
+            "EF_std":        np.std(seed_efs),
+            "hit_mean":      np.mean(seed_hits),
+            "hit_std":       np.std(seed_hits),
+            "baseline_hit":  baseline_hit,
+        }
+        lc_results.append(result)
+
+        print(f"  init={frac:.0%} ({result['n_init_mean']:.0f} expts) | "
+              f"AF={result['AF_mean']:.2f}±{result['AF_std']:.2f}  "
+              f"EF={result['EF_mean']:.2f}±{result['EF_std']:.2f}  "
+              f"Hit={result['hit_mean']*100:.1f}±{result['hit_std']*100:.1f}% "
+              f"(base={baseline_hit*100:.1f}%)")
+
+    # ── Summary table ──────────────────────────────────────────────────────
+    print("\n" + "=" * 70)
+    print("  LEARNING CURVE SUMMARY")
+    print("=" * 70)
+    header = (f"{'Frac':>6}  {'n_init':>6}  {'AF':>12}  "
+              f"{'EF':>12}  {'Hit%':>12}  {'Base%':>6}")
+    print(header)
+    print("-" * len(header))
+    for r in lc_results:
+        print(f"{r['init_frac']:>5.0%}  {r['n_init_mean']:>6.0f}  "
+              f"{r['AF_mean']:>5.2f}±{r['AF_std']:<5.2f}  "
+              f"{r['EF_mean']:>5.2f}±{r['EF_std']:<5.2f}  "
+              f"{r['hit_mean']*100:>5.1f}±{r['hit_std']*100:<4.1f}%  "
+              f"{r['baseline_hit']*100:>5.1f}%")
+
+    # Find the knee — smallest fraction where hit rate > 1.5× baseline
+    for r in lc_results:
+        if r["hit_mean"] > 1.5 * r["baseline_hit"]:
+            print(f"\n  → Recommendation: ~{r['n_init_mean']:.0f} initial experiments "
+                  f"({r['init_frac']:.0%}) needed for hit rate > 1.5× baseline")
+            break
+    else:
+        print("\n  → Hit rate never reached 1.5× baseline in this sweep. "
+              "Consider increasing --bo-iterations or trying different surrogates.")
+
+    plot_learning_curve(lc_results)
 
 
 def _run_recommend(args):
@@ -996,6 +1425,8 @@ def run_bo_ablation(args):
 
     X_cv, y_raw, y_remapped, df_merged, mask = _load_bo_data(args.data)
     ck_params = _load(PARAMS_CKPT) or {}
+    from bo_core import compute_chemistry_groups
+    groups, group_names = compute_chemistry_groups(df_merged)
 
     # Acquisitions that do not use regression surrogate mu/sigma for scoring.
     # "lfbo" and "lfbo_ssl" are BORE variants: same classifier approach, but
@@ -1038,7 +1469,7 @@ def run_bo_ablation(args):
                 random_state=seed,
                 bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
             )
-            history = bo.run_simulation(X_cv, y_raw)
+            history = bo.run_simulation(X_cv, y_raw, groups=groups)
             metrics = SimulationMetrics(y_raw)
             summary = metrics.summary(history)
             all_histories.append(history)
@@ -1066,7 +1497,7 @@ def run_bo_ablation(args):
                     random_state=seed,
                     bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
                 )
-                history = bo.run_simulation(X_cv, y_raw)
+                history = bo.run_simulation(X_cv, y_raw, groups=groups)
                 metrics = SimulationMetrics(y_raw)
                 summary = metrics.summary(history)
                 all_histories.append(history)
@@ -1103,7 +1534,7 @@ def run_bo_ablation(args):
             random_state=RANDOM_STATE,
             bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
         )
-        history = bo.run_batch(X_cv, y_raw)
+        history = bo.run_batch(X_cv, y_raw, groups=groups)
         label = f"batch|{best_acq}|{strat}"
         all_histories.append(history)
         all_labels.append(label)
@@ -1197,8 +1628,11 @@ if __name__ == "__main__":
     parser.add_argument("--bo", action="store_true",
                         help="Run Bayesian Optimization instead of classification pipeline")
     parser.add_argument("--bo-mode", type=str, default="simulate",
-                        choices=["simulate", "recommend", "batch"],
-                        help="BO operating mode")
+                        choices=["simulate", "recommend", "batch",
+                                 "evaluate", "loco", "learning-curve"],
+                        help="BO operating mode. evaluate=multi-seed per-cluster "
+                             "metrics; loco=leave-one-cluster-out generalization; "
+                             "learning-curve=AF vs init fraction sweep")
     parser.add_argument("--bo-surrogate", type=str, default="rf_mi",
                         choices=["rf_mi", "xgb_mi", "rf_cl_mi", "xgb_cl_mi",
                                  "rf_cl_only", "xgb_cl_only"],
@@ -1229,6 +1663,8 @@ if __name__ == "__main__":
                         help="Apply synthesis feasibility prior to acquisition scores in recommend "
                              "mode: penalises candidates with temperature above solvent boiling "
                              "point (Griffiths et al., Digital Discovery 2022).")
+    parser.add_argument("--bo-eval-seeds", type=int, default=5,
+                        help="Number of random seeds for --bo-mode evaluate (default 5)")
 
     # Classification pipeline options
     parser.add_argument("--skip-tuning", action="store_true",
