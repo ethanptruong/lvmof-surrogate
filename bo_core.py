@@ -233,12 +233,18 @@ class SearchSpace:
     """Generate candidate parameter sets: LHS over continuous params × solvent pairs.
 
     phi_1 (solvent_1 volume fraction) is now a continuous BO parameter in the LHS;
-    the solvent_mixer is used only to enumerate unique (sol1, sol2) pairs observed
-    in the training data.  COSMO features are computed on-the-fly by
-    CandidateFeaturizer using CosmoMixer.
+    the solvent_mixer is used only to enumerate (sol1, sol2) pairs whose COSMO
+    features are computed on-the-fly by CandidateFeaturizer.
+
+    By default (observed_pairs_only=False) the search space includes every
+    single-solvent option and every binary combination that can be formed from
+    the individual solvents the lab has ever used, as long as both solvents have
+    COSMO profiles.  Pass observed_pairs_only=True to restrict candidates to
+    exactly the (sol1, sol2) co-occurrences seen in the training data.
     """
 
-    def __init__(self, train_df=None, solvent_mixer=None, extra_params=None):
+    def __init__(self, train_df=None, solvent_mixer=None, extra_params=None,
+                 observed_pairs_only=False):
         all_params = dict(BO_CONTROLLABLE_PARAMS)
         if extra_params:
             all_params.update(extra_params)
@@ -258,15 +264,35 @@ class SearchSpace:
                 self.bounds[param] = (1.0, 100.0)  # fallback
 
         self.solvent_mixer = solvent_mixer
-        # Enumerate unique (sol1, sol2) pairs from training data
-        self.solvent_pairs = (
-            self._enumerate_pairs(train_df, solvent_mixer)
-            if solvent_mixer is not None and train_df is not None
-            else [{"solvent_1": "", "solvent_2": ""}]
-        )
+        if solvent_mixer is not None and train_df is not None:
+            if observed_pairs_only:
+                self.solvent_pairs = self._enumerate_observed_pairs(train_df, solvent_mixer)
+            else:
+                self.solvent_pairs = self._enumerate_all_pairs(train_df, solvent_mixer)
+        else:
+            self.solvent_pairs = [{"solvent_1": "", "solvent_2": ""}]
 
-    def _enumerate_pairs(self, train_df, solvent_mixer):
-        """Build unique (sol1, sol2) pairs observed in training data."""
+    def _enumerate_all_pairs(self, train_df, solvent_mixer):
+        """All single-solvent + binary combinations from individually-used solvents.
+
+        Any solvent seen in any column of train_df that also has a COSMO profile
+        is included.  Binary pairs are formed as all unordered combinations of
+        those solvents (sol1 < sol2 alphabetically to avoid duplicates).
+        """
+        import itertools
+        solvents = sorted(solvent_mixer.available_solvents_from_df(train_df))
+        if not solvents:
+            return [{"solvent_1": "", "solvent_2": ""}]
+        pairs = [{"solvent_1": s, "solvent_2": ""} for s in solvents]
+        for s1, s2 in itertools.combinations(solvents, 2):
+            pairs.append({"solvent_1": s1, "solvent_2": s2})
+        print(f"  [SearchSpace] {len(solvents)} lab solvents → "
+              f"{len(solvents)} single + {len(pairs) - len(solvents)} binary = "
+              f"{len(pairs)} solvent combinations")
+        return pairs
+
+    def _enumerate_observed_pairs(self, train_df, solvent_mixer):
+        """Build unique (sol1, sol2) pairs observed together in training data."""
         available = set(solvent_mixer.available_solvents_from_df(train_df))
         seen = set()
         pairs = []
@@ -817,6 +843,10 @@ class BatchSelector:
                 new_x if isinstance(X_candidates, np.ndarray) else
                 pd.DataFrame(new_x, columns=X_candidates.columns)
             )[0]
+            # Round to nearest integer so y_aug stays integer-valued:
+            # mutual_info_classif (used in AdaptiveSelectKBest) rejects
+            # continuous-typed arrays.
+            mu_hallucinated = np.round(mu_hallucinated)
             X_aug = np.vstack([X_aug, new_x]) if isinstance(X_aug, np.ndarray) else \
                     pd.concat([X_aug, pd.DataFrame(new_x, columns=X_aug.columns)], ignore_index=True)
             y_aug = np.append(y_aug, mu_hallucinated)
@@ -1182,9 +1212,12 @@ class NeighborhoodTemplateSelector:
         X_groups,
         linker_col="smiles_linker_1",
         precursor_col="smiles_precursor",
+        modulator_col="smiles_modulator",
         score_col="pxrd_score",
         fp_blend=0.3,
-        linker_weight=0.65,
+        linker_weight=0.60,
+        precursor_weight=0.30,
+        modulator_weight=0.10,
         top_k=15,
         min_similarity=0.05,
         fp_radius=2,
@@ -1200,11 +1233,16 @@ class NeighborhoodTemplateSelector:
         X_groups             : list[str] len d — feature group labels per column
         linker_col           : str — SMILES column for the linker in df_train
         precursor_col        : str — SMILES column for the precursor in df_train
+        modulator_col        : str — SMILES column for the modulator in df_train
         score_col            : str — outcome column
         fp_blend             : float in [0,1] — weight given to Morgan FP similarity
                                vs chemistry feature cosine similarity (default 0.3).
                                Lower = trust the surrogate features more.
-        linker_weight        : float — weight for linker vs precursor in FP similarity
+        linker_weight        : float — weight for linker in FP similarity (default 0.60)
+        precursor_weight     : float — weight for precursor in FP similarity (default 0.30)
+        modulator_weight     : float — weight for modulator in FP similarity (default 0.10).
+                               Only applied when a target modulator SMILES is provided.
+                               Weights are renormalized when modulator is absent.
         top_k                : int — number of neighbors to return
         min_similarity       : float — minimum combined similarity to include
         fp_radius            : int — Morgan FP radius (2 = ECFP4)
@@ -1223,10 +1261,12 @@ class NeighborhoodTemplateSelector:
         self.df            = df_train.copy().reset_index(drop=True)
         self.linker_col    = linker_col
         self.precursor_col = precursor_col
+        self.modulator_col = modulator_col
         self.score_col     = score_col
         self.fp_blend      = float(fp_blend)
         self.linker_weight    = linker_weight
-        self.precursor_weight = 1.0 - linker_weight
+        self.precursor_weight = precursor_weight
+        self.modulator_weight = modulator_weight
         self.top_k          = top_k
         self.min_similarity = min_similarity
         self.fp_radius = fp_radius
@@ -1239,6 +1279,10 @@ class NeighborhoodTemplateSelector:
                                df_train[linker_col].fillna("")]
         self._precursor_fps = [self._to_fp(s) for s in
                                df_train[precursor_col].fillna("")]
+        mod_col_data = (df_train[modulator_col].fillna("")
+                        if modulator_col in df_train.columns
+                        else pd.Series([""] * len(df_train)))
+        self._modulator_fps = [self._to_fp(s) for s in mod_col_data]
 
         # ── Hub element pre-computation ────────────────────────────────────────
         self._hub_elements = [
@@ -1288,13 +1332,30 @@ class NeighborhoodTemplateSelector:
         from rdkit.DataStructs import TanimotoSimilarity
         return float(TanimotoSimilarity(fp1, fp2))
 
-    def _fp_similarity(self, tgt_linker_fp, tgt_precursor_fp):
-        """Return per-experiment combined Morgan FP similarity array."""
+    def _fp_similarity(self, tgt_linker_fp, tgt_precursor_fp, tgt_modulator_fp=None):
+        """Return per-experiment combined Morgan FP similarity array.
+
+        When tgt_modulator_fp is None the linker/precursor weights are
+        renormalized to sum to 1 so the absence of a modulator target
+        doesn't artificially deflate all similarity scores.
+        """
+        use_mod = tgt_modulator_fp is not None
+        if use_mod:
+            lw = self.linker_weight
+            pw = self.precursor_weight
+            mw = self.modulator_weight
+        else:
+            total = self.linker_weight + self.precursor_weight
+            lw = self.linker_weight / total
+            pw = self.precursor_weight / total
+            mw = 0.0
+
         sims = np.zeros(len(self.df))
         for i in range(len(self.df)):
             l = self._tanimoto(tgt_linker_fp,    self._linker_fps[i])
             p = self._tanimoto(tgt_precursor_fp, self._precursor_fps[i])
-            sims[i] = self.linker_weight * l + self.precursor_weight * p
+            m = self._tanimoto(tgt_modulator_fp, self._modulator_fps[i]) if use_mod else 0.0
+            sims[i] = lw * l + pw * p + mw * m
         return sims
 
     def _feat_similarity(self, ref_idx):
@@ -1348,7 +1409,7 @@ class NeighborhoodTemplateSelector:
     # ── main ──────────────────────────────────────────────────────────────────
 
     def select(self, target_linker_smiles, target_precursor_smiles,
-               search_bounds):
+               search_bounds, target_modulator_smiles=None):
         """Find similar experiments and return weighted process center + spread.
 
         Parameters
@@ -1356,6 +1417,10 @@ class NeighborhoodTemplateSelector:
         target_linker_smiles    : str — SMILES of the target linker
         target_precursor_smiles : str — SMILES of the target precursor
         search_bounds           : dict — param → (lo, hi) from SearchSpace.bounds
+        target_modulator_smiles : str or None — SMILES of the modulator (optional).
+                                  When provided, modulator Tanimoto similarity
+                                  is included in the neighbor search with weight
+                                  self.modulator_weight.
 
         Returns
         -------
@@ -1366,9 +1431,16 @@ class NeighborhoodTemplateSelector:
         """
         tgt_linker_fp    = self._to_fp(target_linker_smiles)
         tgt_precursor_fp = self._to_fp(target_precursor_smiles)
+        tgt_modulator_fp = (self._to_fp(target_modulator_smiles)
+                            if target_modulator_smiles else None)
+
+        if tgt_modulator_fp is not None:
+            print(f"[NeighborhoodTemplate] Modulator included in similarity "
+                  f"(weight={self.modulator_weight:.2f})")
 
         # Stage 1: Morgan FP similarity for all experiments
-        fp_sims = self._fp_similarity(tgt_linker_fp, tgt_precursor_fp)
+        fp_sims = self._fp_similarity(tgt_linker_fp, tgt_precursor_fp,
+                                      tgt_modulator_fp)
 
         # Stage 1b: find the single nearest neighbor by FP similarity.
         # Its chemistry feature row becomes the reference for Stage 2.

@@ -265,8 +265,19 @@ def build_mordred_rac_features(df_merged, fp_cols, num_descriptors, calc):
     if mod_smiles_col is None:
         raise KeyError("Could not find a modulator SMILES column in df_merged.")
 
-    # Modulator RACs
-    mod_out = df_merged[mod_smiles_col].apply(get_mordred_racs_smiles_with_stats).values
+    # Modulator RACs (cached per SMILES)
+    from smiles_cache import get_smiles_cache
+    _smi_cache = get_smiles_cache()
+    NS_MORD = "mordred_rac_v1"
+
+    mod_out = []
+    for smi in df_merged[mod_smiles_col]:
+        cached = _smi_cache.get(NS_MORD, smi)
+        if cached is None:
+            cached = get_mordred_racs_smiles_with_stats(smi)
+            _smi_cache.set(NS_MORD, smi, cached)
+        mod_out.append(cached)
+
     X_modulator_rac = np.stack([t[0] for t in mod_out])
     mod_rac_any_bad = np.array([t[1] for t in mod_out], dtype=float).reshape(-1, 1)
     mod_rac_frac_bad = np.array([t[2] for t in mod_out], dtype=float).reshape(-1, 1)
@@ -305,7 +316,11 @@ def build_mordred_rac_features(df_merged, fp_cols, num_descriptors, calc):
             continue
 
         if smi not in token_to_vec:
-            v, a, f = get_mordred_racs_smiles_with_stats(smi)
+            cached = _smi_cache.get(NS_MORD, smi)
+            if cached is None:
+                cached = get_mordred_racs_smiles_with_stats(smi)
+                _smi_cache.set(NS_MORD, smi, cached)
+            v, a, f = cached
             token_to_vec[smi] = v
             token_to_any[smi] = a
             token_to_frac[smi] = f
@@ -338,7 +353,11 @@ def build_mordred_rac_features(df_merged, fp_cols, num_descriptors, calc):
                 rac_cache[col] = (np.zeros(D, dtype=float), 1.0, 1.0)
                 continue
 
-            vec, any_bad, frac_bad = get_mordred_racs_smiles_with_stats(smi)
+            cached = _smi_cache.get(NS_MORD, smi)
+            if cached is None:
+                cached = get_mordred_racs_smiles_with_stats(smi)
+                _smi_cache.set(NS_MORD, smi, cached)
+            vec, any_bad, frac_bad = cached
             rac_cache[col] = (vec, float(any_bad), float(frac_bad))
 
         count_matrix_rac = np.column_stack([
@@ -402,8 +421,19 @@ def build_tep_features(df_merged, linker_col, mod_col, fp_cols):
     and per-ligand precursor blocks.
     Returns (X_modulator_tep, X_linker_tep, X_precursor_perlig_tep).
     """
-    X_modulator_tep = np.stack(df_merged[mod_col].apply(get_tepid_value).values)
-    X_linker_tep = np.stack(df_merged[linker_col].apply(get_tepid_value).values)
+    from smiles_cache import get_smiles_cache
+    _smi_cache = get_smiles_cache()
+    NS_TEP = "tep_v1"
+
+    def _tep_cached(smi):
+        val = _smi_cache.get(NS_TEP, smi)
+        if val is None:
+            val = get_tepid_value(smi)
+            _smi_cache.set(NS_TEP, smi, val)
+        return val
+
+    X_modulator_tep = np.stack(df_merged[mod_col].apply(_tep_cached).values)
+    X_linker_tep = np.stack(df_merged[linker_col].apply(_tep_cached).values)
 
     n = len(df_merged)
     n_fp_lig = len(fp_cols)
@@ -418,8 +448,11 @@ def build_tep_features(df_merged, linker_col, mod_col, fp_cols):
                 tep_cache[col] = (0.0, 1.0)
                 continue
 
-            tep_val, miss_flag = get_tepid_value(smi)
-            tep_cache[col] = (float(tep_val), float(miss_flag))
+            cached = _smi_cache.get(NS_TEP, smi)
+            if cached is None:
+                cached = get_tepid_value(smi)
+                _smi_cache.set(NS_TEP, smi, cached)
+            tep_cache[col] = (float(cached[0]), float(cached[1]))
 
         count_matrix_tep = np.column_stack([
             pd.to_numeric(df_merged[col], errors='coerce')
@@ -481,6 +514,10 @@ def build_steric_features(df_merged, fp_cols):
     n_fp_lig = len(fp_cols)
 
     if n_fp_lig > 0:
+        from smiles_cache import get_smiles_cache
+        _smi_cache = get_smiles_cache()
+        NS_STERIC = "steric_v1"
+
         steric_cache = {}
 
         for col in fp_cols:
@@ -491,18 +528,24 @@ def build_steric_features(df_merged, fp_cols):
                 steric_cache[col] = (0.0, 0.0, 0.0)
                 continue
 
+            disk_val = _smi_cache.get(NS_STERIC, smi)
+            if disk_val is not None:
+                steric_cache[col] = disk_val
+                continue
+
             processed_smi = process_for_sterics(smi, extra_remove=None)
 
             if processed_smi is None or ('P' not in processed_smi and 'p' not in processed_smi):
-                steric_cache[col] = (0.0, 0.0, 0.0)
-                continue
-
-            cone, buried = get_phosphine_sterics(processed_smi)
-
-            if np.isnan(cone) or np.isnan(buried):
-                steric_cache[col] = (0.0, 0.0, 1.0)
+                result = (0.0, 0.0, 0.0)
             else:
-                steric_cache[col] = (float(cone), float(buried), 0.0)
+                cone, buried = get_phosphine_sterics(processed_smi)
+                if np.isnan(cone) or np.isnan(buried):
+                    result = (0.0, 0.0, 1.0)
+                else:
+                    result = (float(cone), float(buried), 0.0)
+
+            _smi_cache.set(NS_STERIC, smi, result)
+            steric_cache[col] = result
 
         count_matrix_steric = np.column_stack([
             pd.to_numeric(df_merged[col], errors='coerce')
@@ -541,41 +584,59 @@ def build_chemberta_block(df_merged, linker_col, mod_col):
     """
     Build ChemBERTa-2 + extended RDKit feature block for linker and modulator.
     Returns (X_chemberta_block, chemberta_feature_names_all).
-    """
-    _PER_MOL_DIM  = BERT_DIM + _N_TOTAL + 10 + 34 + 8 + 167 + 15
-    _ROLES        = [("linker", linker_col), ("mod", mod_col)]
 
+    Per-SMILES results are cached in checkpoints/smiles_cache.pkl so that
+    transformer inference is only run for SMILES not seen in previous runs.
+    """
+    from smiles_cache import get_smiles_cache
+    cache = get_smiles_cache()
+    NS = "chemberta_v1"
+
+    _ROLES = [("linker", linker_col), ("mod", mod_col)]
     chemberta_feature_names_all = []
     blocks = []
 
     for role, col in _ROLES:
         smi_list = df_merged[col].tolist()
-        n        = len(smi_list)
+        n = len(smi_list)
 
-        bert  = chemberta_batch(smi_list)
-        extrd = np.stack([get_ext_rdkit(s) for s in smi_list])
-        shape = np.stack([get_3d_shape(s) for s in smi_list])
-        vsa   = np.stack([get_vsa_descriptors(s) for s in smi_list])
-        comp  = np.stack([get_composition(s) for s in smi_list])
-        maccs = np.stack([get_maccs(s) for s in smi_list])
-        frags = np.stack([get_key_fragments(s) for s in smi_list])
+        cached_rows = [cache.get(NS, s) for s in smi_list]
+        new_indices = [i for i, r in enumerate(cached_rows) if r is None]
+        new_smiles  = [smi_list[i] for i in new_indices]
 
-        block = np.hstack([bert, extrd, shape, vsa, comp, maccs, frags])
+        if new_smiles:
+            print(f"  [smiles_cache] chemberta/{role}: "
+                  f"{len(new_smiles)} new, {n - len(new_smiles)} cached")
+            bert_n  = chemberta_batch(new_smiles)
+            extrd_n = np.stack([get_ext_rdkit(s) for s in new_smiles])
+            shape_n = np.stack([get_3d_shape(s) for s in new_smiles])
+            vsa_n   = np.stack([get_vsa_descriptors(s) for s in new_smiles])
+            comp_n  = np.stack([get_composition(s) for s in new_smiles])
+            maccs_n = np.stack([get_maccs(s) for s in new_smiles])
+            frags_n = np.stack([get_key_fragments(s) for s in new_smiles])
 
-        bad = ~np.isfinite(block)
-        if bad.any():
-            block[bad] = 0.0
+            block_n = np.hstack([bert_n, extrd_n, shape_n, vsa_n,
+                                  comp_n, maccs_n, frags_n])
+            block_n = np.where(np.isfinite(block_n), block_n, 0.0)
 
+            for local_i, (orig_i, smi) in enumerate(zip(new_indices, new_smiles)):
+                row = block_n[local_i]
+                cache.set(NS, smi, row)
+                cached_rows[orig_i] = row
+        else:
+            print(f"  [smiles_cache] chemberta/{role}: all {n} from cache")
+
+        block = np.stack(cached_rows)
         blocks.append(block)
 
         role_names = (
-            [f"{role}_bert_{i}"     for i in range(BERT_DIM)]
-            + [f"{role}_{n_}"       for n_ in _EXT_RDKIT_BASE_NAMES]
-            + [f"{role}_{n_}"       for n_ in SHAPE_3D_NAMES]
-            + [f"{role}_{n_}"       for n_ in VSA_NAMES]
-            + [f"{role}_{n_}"       for n_ in COMPOSITION_NAMES]
-            + [f"{role}_{n_}"       for n_ in MACCS_NAMES]
-            + [f"{role}_{n_}"       for n_ in FRAGMENT_NAMES]
+            [f"{role}_bert_{i}" for i in range(BERT_DIM)]
+            + [f"{role}_{n_}"   for n_ in _EXT_RDKIT_BASE_NAMES]
+            + [f"{role}_{n_}"   for n_ in SHAPE_3D_NAMES]
+            + [f"{role}_{n_}"   for n_ in VSA_NAMES]
+            + [f"{role}_{n_}"   for n_ in COMPOSITION_NAMES]
+            + [f"{role}_{n_}"   for n_ in MACCS_NAMES]
+            + [f"{role}_{n_}"   for n_ in FRAGMENT_NAMES]
         )
         chemberta_feature_names_all.extend(role_names)
 
@@ -588,19 +649,29 @@ def build_g14_features(df_merged, linker_col, mod_col):
     Build G14 hub topology and SMARTS features for linker and modulator.
     Returns (X_g14_block, g14_feature_names).
     """
-    X_linker_g14hub = np.stack(
-        df_merged[linker_col].apply(get_g14_hub_topology).values
-    )
-    X_mod_g14hub = np.stack(
-        df_merged[mod_col].apply(get_g14_hub_topology).values
-    )
+    from smiles_cache import get_smiles_cache
+    _smi_cache = get_smiles_cache()
+    NS_HUB    = "g14_hub_v1"
+    NS_SMARTS = "g14_smarts_v1"
 
-    X_linker_g14s = np.stack(
-        df_merged[linker_col].apply(get_g14_smarts_features).values
-    )
-    X_mod_g14s = np.stack(
-        df_merged[mod_col].apply(get_g14_smarts_features).values
-    )
+    def _hub_cached(smi):
+        val = _smi_cache.get(NS_HUB, smi)
+        if val is None:
+            val = get_g14_hub_topology(smi)
+            _smi_cache.set(NS_HUB, smi, val)
+        return val
+
+    def _smarts_cached(smi):
+        val = _smi_cache.get(NS_SMARTS, smi)
+        if val is None:
+            val = get_g14_smarts_features(smi)
+            _smi_cache.set(NS_SMARTS, smi, val)
+        return val
+
+    X_linker_g14hub = np.stack(df_merged[linker_col].apply(_hub_cached).values)
+    X_mod_g14hub    = np.stack(df_merged[mod_col].apply(_hub_cached).values)
+    X_linker_g14s   = np.stack(df_merged[linker_col].apply(_smarts_cached).values)
+    X_mod_g14s      = np.stack(df_merged[mod_col].apply(_smarts_cached).values)
 
     X_g14_block = np.concatenate(
         [X_linker_g14hub, X_mod_g14hub, X_linker_g14s, X_mod_g14s], axis=1
@@ -632,7 +703,18 @@ def build_ttp_features(df_merged, linker_col):
     if _linker_col is None:
         _linker_col = linker_col
 
-    Xlinker_ttp = np.stack(df_merged[_linker_col].apply(get_ttp_features).values)
+    from smiles_cache import get_smiles_cache
+    _smi_cache = get_smiles_cache()
+    NS_TTP = "ttp_v1"
+
+    def _ttp_cached(smi):
+        val = _smi_cache.get(NS_TTP, smi)
+        if val is None:
+            val = get_ttp_features(smi)
+            _smi_cache.set(NS_TTP, smi, val)
+        return val
+
+    Xlinker_ttp = np.stack(df_merged[_linker_col].apply(_ttp_cached).values)
 
     bad = ~np.isfinite(Xlinker_ttp)
     if bad.any():
@@ -712,7 +794,14 @@ def build_drfp_block(df_merged):
     """
     Build DRFP (Differential Reaction Fingerprint) block.
     Returns (X_drfp, drfp_feature_names).
+
+    Results are cached per reaction-SMILES string so DrfpEncoder.encode is
+    only called for reaction combinations not seen in previous runs.
     """
+    from smiles_cache import get_smiles_cache
+    cache = get_smiles_cache()
+    NS = "drfp_v1"
+
     def make_rxn_smiles(row):
         parts = []
         for col in ['smiles_precursor', 'smiles_linker1', 'smiles_modulator']:
@@ -723,22 +812,64 @@ def build_drfp_block(df_merged):
                 parts.append(str(val).strip())
         return '.'.join(parts) + '>>' if parts else '>>'
 
-    
     rxn_smiles_list = df_merged.apply(make_rxn_smiles, axis=1).tolist()
+    n = len(rxn_smiles_list)
 
-    X_drfp = np.array(DrfpEncoder.encode(
-        rxn_smiles_list,
-        n_folded_length=2048,
-        radius=3,
-        rings=True
-    ), dtype=np.float32)
+    cached_rows = [cache.get(NS, rxn) for rxn in rxn_smiles_list]
+    new_indices = [i for i, r in enumerate(cached_rows) if r is None]
+    new_rxns    = [rxn_smiles_list[i] for i in new_indices]
 
-    assert X_drfp.shape == (len(df_merged), 2048), \
-        f"Unexpected DRFP shape: {X_drfp.shape}"
+    if new_rxns:
+        print(f"  [smiles_cache] drfp: {len(new_rxns)} new, {n - len(new_rxns)} cached")
+        new_fps = np.array(DrfpEncoder.encode(
+            new_rxns, n_folded_length=2048, radius=3, rings=True
+        ), dtype=np.float32)
+        for local_i, (orig_i, rxn) in enumerate(zip(new_indices, new_rxns)):
+            cache.set(NS, rxn, new_fps[local_i])
+            cached_rows[orig_i] = new_fps[local_i]
+    else:
+        print(f"  [smiles_cache] drfp: all {n} from cache")
+
+    X_drfp = np.stack(cached_rows).astype(np.float32)
+
+    assert X_drfp.shape == (n, 2048), f"Unexpected DRFP shape: {X_drfp.shape}"
     assert np.isfinite(X_drfp).all(), "Non-finite values in X_drfp"
 
     drfp_feature_names = [f'drfp_{i}' for i in range(2048)]
     return X_drfp, drfp_feature_names
+
+
+def _soap_with_cache(role: str, smiles_series: "pd.Series") -> tuple:
+    """Run run_soap_block, skipping SMILES already in the persistent cache.
+
+    Returns (X_soap, feature_names) with the same shape as the full series.
+    """
+    from smiles_cache import get_smiles_cache
+    cache = get_smiles_cache()
+    NS = f"soap_{role}_v1"
+    NS_NAMES = f"soap_{role}_names_v1"
+
+    smi_list = smiles_series.tolist()
+    n = len(smi_list)
+
+    cached_rows = [cache.get(NS, s) for s in smi_list]
+    new_indices = [i for i, r in enumerate(cached_rows) if r is None]
+
+    feature_names = cache.get(NS_NAMES, "__names__") or []
+
+    if new_indices:
+        new_series = pd.Series([smi_list[i] for i in new_indices])
+        print(f"  [smiles_cache] soap/{role}: "
+              f"{len(new_indices)} new, {n - len(new_indices)} cached")
+        new_matrix, feature_names = run_soap_block(role, new_series)
+        cache.set(NS_NAMES, "__names__", feature_names)
+        for local_i, orig_i in enumerate(new_indices):
+            cache.set(NS, smi_list[orig_i], new_matrix[local_i])
+            cached_rows[orig_i] = new_matrix[local_i]
+    else:
+        print(f"  [smiles_cache] soap/{role}: all {n} from cache")
+
+    return np.stack(cached_rows), feature_names
 
 
 def build_soap_block(df_merged, linker_col):
@@ -746,12 +877,14 @@ def build_soap_block(df_merged, linker_col):
     Build SOAP (Smooth Overlap of Atomic Positions) 3D descriptor block
     for precursor sterics and linker.
     Returns (X_soap_precursor, X_soap_linker, soap_all_names).
+
+    Per-SMILES SOAP vectors are cached in checkpoints/smiles_cache.pkl.
     """
     slatm_src_col = 'precursor_sterics_smiles'
-    X_soap_precursor, soap_precursor_names = run_soap_block(
+    X_soap_precursor, soap_precursor_names = _soap_with_cache(
         'precursor', df_merged[slatm_src_col]
     )
-    X_soap_linker, soap_linker_names = run_soap_block(
+    X_soap_linker, soap_linker_names = _soap_with_cache(
         'linker', df_merged[linker_col]
     )
     soap_all_names = soap_precursor_names + soap_linker_names

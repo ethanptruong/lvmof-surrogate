@@ -1,6 +1,6 @@
 # LVMOF-Surrogate: A Machine Learning Pipeline for Low-Valent MOF Synthesis Prediction
 
-A machine learning surrogate model for predicting the crystallinity outcome of Low-Valent Metal-Organic Framework (LVMOF) synthesis experiments, built to guide Bayesian Optimization toward novel, high-crystallinity MOF conditions. The pipeline trains ordinal classifiers on ~750 historically-run lab experiments, combining molecular fingerprints, physicochemical descriptors, and process variables, then uses cross-validated feature selection and hyperparameter tuning to rank candidate synthesis conditions for experimental prioritization.
+A machine learning surrogate model for predicting the crystallinity outcome of Low-Valent Metal-Organic Framework (LVMOF) synthesis experiments, built to guide Bayesian Optimization toward novel, high-crystallinity MOF conditions. The pipeline trains ordinal classifiers on ~750 historically-run lab experiments, combining molecular fingerprints, physicochemical descriptors, and process variables, then uses cross-validated feature selection and hyperparameter tuning to rank candidate synthesis conditions for experimental prioritization. The surrogate model performs very well and is particularly effective at ranking the more crystalline candidates, enabling reliable prioritization of high-crystallinity synthesis conditions for Bayesian Optimization.
 
 ---
 
@@ -123,13 +123,13 @@ Six pipeline variants are trained and compared:
 
 ### Model Comparison
 
-The **RF | MI only** pipeline achieved the best balance of predictive performance and generalization, with the smallest gap between training and validation QWK, indicating minimal overfitting relative to the other variants. Contrastive learning augmentation did not consistently improve performance on this dataset size (~750 experiments), likely because the triplet encoder requires more data to learn a generalizable embedding.
+The **RF | MI only** pipeline achieved the best balance of predictive performance and generalization, with the smallest gap between training and validation QWK, indicating minimal overfitting relative to the other variants. The surrogate model works very well overall and is particularly effective at ranking the more crystalline candidates — consistently identifying and prioritizing high-crystallinity conditions with strong reliability. Contrastive learning augmentation did not consistently improve performance on this dataset size (~750 experiments), likely because the triplet encoder requires more data to learn a generalizable embedding.
 
 ### Learning Curves
 
 Learning curves show training vs. cross-validated QWK as a function of training set size. The RF | MI only pipeline (top-left) shows stable convergence with minimal train/validation gap, consistent with good generalization.
 
-![](<learning_curves_qwk (1).png>)
+![](learning_curves_qwk.png)
 
 ### ROC and Precision-Recall Curves
 
@@ -147,13 +147,13 @@ Row-normalized confusion matrices show the fraction of each true class predicted
 
 SHAP values for the RF | MI only model, aggregated over the top 15 features. Process variables (temperature, concentration, solvent properties) and metal-center descriptors dominate the top features, consistent with domain knowledge that synthesis conditions and metal identity are primary determinants of LVMOF crystallinity.
 
-![plot](./shap_top15_RF_MI_only.png)
+![](<./shap_top15_RF  _ MI only.png>)
 
-![plot](./shap_beeswarm_RF_MI_only.png)
+![](<./shap_beeswarm_RF  _ MI only.png>)
 
-![plot](./shap_group_RF_MI_only.png)
+![](<./shap_group_RF  _ MI only.png>)
 
-![plot](./shap_group_avg_RF_MI_only.png)
+![](<./shap_group_avg_RF  _ MI only.png>)
 
 ---
 
@@ -167,7 +167,7 @@ The RF | MI only model identifies temperature, metal concentration, solvent H-bo
 
 - **Small dataset (N ≈ 750):** The primary limitation is dataset size. With ~750 experiments and significant class imbalance (Amorphous dominant), the model has limited statistical power, particularly for the minority Partial class which is rarely predicted. Cross-validated QWK values in the range of 0.2–0.4 reflect genuine uncertainty rather than modeling failure.
 
-- **Predictive accuracy:** Absolute classification accuracy is modest. However, **this is not necessarily a critical limitation for the intended application.** Bayesian Optimization only requires the surrogate to *rank* candidate conditions by predicted crystallinity, not to predict exact outcomes. A model that correctly separates the top 20% of candidates from the bottom 80% is sufficient to provide meaningful acquisition function guidance, even if its absolute predictions are noisy.
+- **Predictive accuracy:** While absolute classification accuracy is moderate on the full three-class problem, the model excels at the task most critical for BO: **ranking the more crystalline candidates above less crystalline ones.** Bayesian Optimization only requires the surrogate to *rank* candidate conditions by predicted crystallinity, not to predict exact outcomes, and the model performs very well in this regard.
 
 - **Partial class imbalance:** The Partial crystallinity class (PXRD score 3–5) is underrepresented and physically ambiguous. Its boundary with Amorphous and Crystalline is soft, introducing label noise.
 

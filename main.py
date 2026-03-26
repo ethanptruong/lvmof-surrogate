@@ -72,6 +72,7 @@ if torch.cuda.is_available():
 CHECKPOINT_DIR = "checkpoints"
 DATA_CKPT      = os.path.join(CHECKPOINT_DIR, "data.pkl")
 PARAMS_CKPT    = os.path.join(CHECKPOINT_DIR, "best_params.pkl")
+FEATURES_CKPT  = os.path.join(CHECKPOINT_DIR, "features.pkl")
 OPTUNA_DB      = f"sqlite:///{CHECKPOINT_DIR}/optuna.db"
 
 
@@ -430,52 +431,52 @@ def main(data_path=None, skip_tuning=False):
 # ── Bayesian Optimization ────────────────────────────────────────────────────
 
 def _load_bo_data(data_path=None):
-    """Load data from checkpoint + raw 0-9 labels for BO simulate/batch modes."""
-    ck = _load(DATA_CKPT)
-    if ck is not None:
-        X_cv = ck["X_cv"]
-        y_remapped = ck["y"]  # 3-class labels
-    else:
-        raise RuntimeError(
-            "Data checkpoint not found. Run the classification pipeline first "
-            "(python main.py) to generate checkpoints/data.pkl."
-        )
+    """Load featurized data for BO simulate/batch modes.
 
-    # We also need the raw 0-9 scores. Reload from source.
-    from data_processing import load_data as _ld, build_inventory, merge_data, fix_missingness
-    df = _ld(data_path or "data/Experiments_with_Calculated_Properties_no_linker.xlsx")
-    df_inventory = build_inventory(df)
-    df_merged = merge_data(df, df_inventory)
-    df_merged = fix_missingness(df_merged)
-
-    import pandas as _pd
-    y_raw_full = _pd.to_numeric(df_merged["pxrd_score"], errors="coerce").to_numpy()
-    mask = np.isfinite(y_raw_full)
-    y_raw = y_raw_full[mask].astype(float)
-
-    if len(y_raw) != X_cv.shape[0]:
-        raise RuntimeError(
-            f"Shape mismatch: y_raw={len(y_raw)}, X_cv={X_cv.shape[0]}. "
-            "Rerun the full pipeline to regenerate data.pkl."
-        )
-
+    Always reflects the current data file — new experiments are picked up
+    automatically.  Results are cached in checkpoints/features.pkl and only
+    recomputed when the data file changes.
+    """
+    X_cv, y_raw, y_remapped, df_merged, mask, _ = _featurize_fresh(data_path)
     return X_cv, y_raw, y_remapped, df_merged, mask
 
 
-def _featurize_fresh(data_path=None):
-    """Re-run the full featurization pipeline from the Excel file.
+def _data_file_fingerprint(data_path):
+    """Return (mtime, size) for the data file — used to detect changes."""
+    try:
+        st = os.stat(data_path)
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
 
-    Used by recommend mode so that newly added experiments are included.
-    Returns (X_cv, y_raw, df_merged, mask, process_cols_present).
+
+def _featurize_fresh(data_path=None):
+    """Featurize from the Excel file, with a file-change cache.
+
+    If the data file hasn't changed since the last run (same mtime + size),
+    the cached result in checkpoints/features.pkl is returned immediately.
+    Otherwise featurization runs and the cache is updated.
+
+    Returns (X_cv, y_raw, y_remapped, df_merged, mask, process_cols_present).
     """
-    import pandas as _pd
     from data_processing import load_data as _ld, build_inventory, merge_data, fix_missingness
     from dimensionality import (prepare_labels, remap_score, apply_variance_threshold,
-                                run_mi_diagnostic, build_process_interactions,
-                                assemble_cv_matrix)
+                                build_process_interactions, assemble_cv_matrix)
 
-    print("[recommend] Featurizing from data file (includes any new experiments)...")
-    df = _ld(data_path or "data/Experiments_with_Calculated_Properties_no_linker.xlsx")
+    resolved_path = data_path or "data/Experiments_with_Calculated_Properties_no_linker.xlsx"
+    fingerprint = _data_file_fingerprint(resolved_path)
+
+    # Check cache
+    cached = _load(FEATURES_CKPT)
+    if (cached is not None
+            and fingerprint is not None
+            and cached.get("fingerprint") == fingerprint):
+        print(f"[features] Cache hit — data file unchanged, skipping featurization.")
+        return (cached["X_cv"], cached["y_raw"], cached["y_remapped"],
+                cached["df_merged"], cached["mask"], cached["process_cols_present"])
+
+    print("[features] Featurizing from data file (includes any new experiments)...")
+    df = _ld(resolved_path)
     df_inventory = build_inventory(df)
     df_merged = merge_data(df, df_inventory)
     df_merged = fix_missingness(df_merged)
@@ -493,8 +494,24 @@ def _featurize_fresh(data_path=None):
     Xprocnorm, interactions, _ = build_process_interactions(df_merged, mask, process_cols_present)
     X_cv = assemble_cv_matrix(X_vt, Xprocnorm, interactions)
 
-    print(f"[recommend] {X_cv.shape[0]} experiments, {X_cv.shape[1]} features, "
+    print(f"[features] {X_cv.shape[0]} experiments, {X_cv.shape[1]} features, "
           f"best score in data: {y_raw.max():.0f}")
+
+    # Persist SMILES-level feature cache (only writes if new entries were added)
+    from smiles_cache import get_smiles_cache
+    get_smiles_cache().flush()
+
+    # Save featurization cache
+    joblib.dump({
+        "fingerprint": fingerprint,
+        "X_cv": X_cv,
+        "y_raw": y_raw,
+        "y_remapped": y_remapped,
+        "df_merged": df_merged,
+        "mask": mask,
+        "process_cols_present": process_cols_present,
+    }, FEATURES_CKPT)
+    print(f"[features] Cache saved → {FEATURES_CKPT}")
 
     return X_cv, y_raw, y_remapped, df_merged, mask, process_cols_present
 
@@ -1121,30 +1138,33 @@ def _run_recommend(args):
       6. Outputs top recommendations
       7. Saves updated BO state
 
-    Trust region mode (--bo-precursor + --bo-linker provided)
-    ---------------------------------------------------------
-    When target chemistry SMILES are supplied, a NeighborhoodTemplateSelector
-    finds structurally similar past experiments (by linker AND precursor
-    Tanimoto similarity) and computes a similarity×score-weighted centroid of
-    their process conditions.  A TuRBO-style trust region is initialised at
-    that centroid and adapts across iterations:
-      - Expands after 3 consecutive improvements (new best pxrd_score found)
-      - Shrinks after 3 consecutive failures
-    This avoids cold-starting from an unrelated chemistry while still
-    exploring the full space if no similar experiments exist.
+    Chemistry-targeted workflow (recommended)
+    -----------------------------------------
+    Provide your target linker, precursor, and/or modulator SMILES.
+    The NeighborhoodTemplateSelector finds the most similar past experiments
+    (by Morgan FP + chemistry-feature cosine similarity) and uses the nearest
+    neighbor's molecular feature row as the fixed chemistry template.  The BO
+    then only searches over process conditions (temperature, concentration,
+    solvent ratio, equivalents) for that specific chemistry.
 
-    The user's workflow (chemistry-targeted):
+    When both --bo-precursor AND --bo-linker are provided, a TuRBO-style trust
+    region is also activated to focus the process-parameter search near
+    conditions that worked for similar chemistry:
+      - Expands after 3 consecutive improvements
+      - Shrinks after 3 consecutive failures
+
       python main.py --bo --bo-mode recommend \\
-          --bo-precursor <SMILES> --bo-linker <SMILES>
-      → Synthesize top candidate → add result to Excel → run again
+          --bo-linker <SMILES> --bo-precursor <SMILES> --bo-modulator <SMILES> \\
+          --bo-surrogate rf_cl_mi --bo-batch-size 3
+      → Synthesize top candidate → add result to data file → run again
 
     Global workflow (no chemistry target, full-space search):
-      python main.py --bo --bo-mode recommend
+      python main.py --bo --bo-mode recommend --bo-surrogate rf_cl_mi --bo-batch-size 3
     """
     from bo_core import (BOLoop, BOCheckpointer, SearchSpace,
                          CandidateFeaturizer, _compute_acquisition,
                          NeighborhoodTemplateSelector, TrustRegion,
-                         FeasibilityScorer)
+                         FeasibilityScorer, BatchSelector)
     from config import BO_OPTIONAL_PARAMS
 
     print("\n" + "=" * 70)
@@ -1190,6 +1210,24 @@ def _run_recommend(args):
                                    ranking_target=args.bo_ranking_target)
     surrogate.fit(X_cv, y_raw)
 
+    # Warn if thompson is used with an XGB surrogate — it degrades to
+    # deterministic predict() because XGB has no tree estimators_ attribute.
+    if args.bo_acquisition == "thompson" and args.bo_surrogate.startswith("xgb"):
+        print("  WARNING: thompson sampling requires a RandomForest surrogate. "
+              "With XGB it falls back to deterministic predict() (no exploration). "
+              "Switch to an rf_* surrogate or a different acquisition function.")
+
+    # Build classifier pipeline for pi_ordinal acquisition
+    pi_ordinal_pipeline = None
+    if args.bo_acquisition == "pi_ordinal":
+        from models import make_rf_pipe
+        rf_params = ck_params.get("best_rf_mi_params", {
+            "n_estimators": 300, "max_depth": 10,
+            "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"})
+        pi_ordinal_pipeline = make_rf_pipe(rf_params, with_cl=False)
+        pi_ordinal_pipeline.fit(X_cv, y_remapped)
+        print("  [pi_ordinal] Classifier pipeline fitted.")
+
     # 4. Build search space
     extra_params = BO_OPTIONAL_PARAMS if args.bo_include_mlr else None
     controllable = list(BO_CONTROLLABLE_PARAMS.keys())
@@ -1198,8 +1236,19 @@ def _run_recommend(args):
     print(f"  Controllable params: {controllable}")
 
     _ck_data = _load(DATA_CKPT) or {}
-    X_names  = _ck_data.get("X_names",  [f"f_{i}" for i in range(X_cv.shape[1])])
-    X_groups = _ck_data.get("X_groups", ["Unknown"] * X_cv.shape[1])
+    X_names  = list(_ck_data.get("X_names",  [f"f_{i}" for i in range(X_cv.shape[1])]))
+    X_groups = list(_ck_data.get("X_groups", ["Unknown"] * X_cv.shape[1]))
+
+    # Align catalog to current X_cv column count (DATA_CKPT may be stale if
+    # new experiments added features since the last full main() run).
+    n_feat = X_cv.shape[1]
+    if len(X_groups) < n_feat:
+        extra = n_feat - len(X_groups)
+        X_names  += [f"unknown_{i}" for i in range(len(X_names), n_feat)]
+        X_groups += ["Unknown"] * extra
+    elif len(X_groups) > n_feat:
+        X_names  = X_names[:n_feat]
+        X_groups = X_groups[:n_feat]
 
     from cosmo_features import CosmoMixer
     cosmo_mixer = CosmoMixer(
@@ -1208,103 +1257,132 @@ def _run_recommend(args):
     )
 
     search_space = SearchSpace(
-        train_df=df_merged[mask], solvent_mixer=cosmo_mixer, extra_params=extra_params
+        train_df=df_merged[mask], solvent_mixer=cosmo_mixer, extra_params=extra_params,
+        observed_pairs_only=args.bo_observed_pairs,
     )
 
-    # ── Trust region logic ────────────────────────────────────────────────────
-    using_trust_region = (args.bo_precursor is not None and
-                          args.bo_linker    is not None)
+    # ── Chemistry template + trust region logic ───────────────────────────────
+    # Chemistry template: find the nearest-neighbor row in the dataset whenever
+    # any SMILES input is provided (linker, precursor, or modulator).  This
+    # fixes the molecular features of the candidate matrix to the user's target
+    # chemistry.  Trust region (narrowing the process-parameter search window)
+    # is activated only when BOTH precursor AND linker are provided.
+    has_chemistry_input = any(x is not None for x in
+                              [args.bo_precursor, args.bo_linker, args.bo_modulator])
+    using_trust_region  = (args.bo_precursor is not None and
+                           args.bo_linker    is not None)
     trust_region = None
     override_bounds = None
     ref_idx = None   # chemistry template — nearest neighbor in dataset
 
-    if using_trust_region:
-        print(f"\n  [TrustRegion] Target precursor: {args.bo_precursor[:40]}...")
-        print(f"  [TrustRegion] Target linker:    {args.bo_linker[:40]}...")
+    if has_chemistry_input:
+        linker_str    = args.bo_linker    or ""
+        precursor_str = args.bo_precursor or ""
+        modulator_str = args.bo_modulator or None
 
-        # Always run the two-stage selector so we get ref_idx for the template.
+        print(f"\n  [Chemistry] Target linker:    "
+              f"{linker_str[:60] or '(not specified)'}")
+        print(f"  [Chemistry] Target precursor: "
+              f"{precursor_str[:60] or '(not specified)'}")
+        if modulator_str:
+            print(f"  [Chemistry] Target modulator: {modulator_str[:60]}")
+
         selector = NeighborhoodTemplateSelector(
             df_train=df_merged[mask],
             X_cv=X_cv,
             X_groups=X_groups,
             linker_col=COLMAP["linker1"],
             precursor_col=COLMAP["precursor"],
+            modulator_col=COLMAP["modulator"],
         )
         center, spread, neighbors, ref_idx = selector.select(
-            target_linker_smiles=args.bo_linker,
-            target_precursor_smiles=args.bo_precursor,
+            target_linker_smiles=linker_str,
+            target_precursor_smiles=precursor_str,
             search_bounds=search_space.bounds,
+            target_modulator_smiles=modulator_str,
         )
 
-        if state.get("trust_region") is not None and iteration > 0:
-            # Restore existing trust region and update with latest f_best
-            trust_region = TrustRegion.from_dict(state["trust_region"])
-            trust_region.update(f_best)
-            print(f"  [TrustRegion] Restored | length={trust_region.length:.3f}")
+        # ── Trust region (only when both precursor + linker are given) ────────
+        if using_trust_region:
+            if state.get("trust_region") is not None and iteration > 0:
+                # Restore existing trust region and update with latest f_best
+                trust_region = TrustRegion.from_dict(state["trust_region"])
+                trust_region.update(f_best)
+                print(f"  [TrustRegion] Restored | length={trust_region.length:.3f}")
 
-            # Recenter on the best experiment currently in the dataset
-            best_idx = int(np.argmax(y_raw))
-            best_row = df_merged[mask].iloc[best_idx]
-            new_center = {}
-            for param in search_space.bounds:
-                col = NeighborhoodTemplateSelector._PARAM_TO_COL.get(param, param)
-                val = pd.to_numeric(best_row.get(col, np.nan), errors="coerce")
-                lo, hi = search_space.bounds[param]
-                if np.isfinite(val):
-                    new_center[param] = float(np.clip(val, lo, hi))
-            trust_region.recenter(new_center)
-            print(f"  [TrustRegion] Recentered on best observed experiment.")
+                # Recenter on the best experiment within the chemistry
+                # neighborhood — not the global best, which may belong to a
+                # completely different molecule and pull the TR to irrelevant
+                # process conditions.
+                if neighbors is not None and len(neighbors) > 0:
+                    nb_positions = neighbors.index.tolist()
+                    best_local   = int(np.argmax(y_raw[nb_positions]))
+                    best_idx     = nb_positions[best_local]
+                    print(f"  [TrustRegion] Recentered on best chemistry-neighborhood "
+                          f"experiment (idx={best_idx}, score={y_raw[best_idx]:.0f}).")
+                else:
+                    best_idx = int(np.argmax(y_raw))
+                    print(f"  [TrustRegion] No neighbors found — recentered on global "
+                          f"best (idx={best_idx}, score={y_raw[best_idx]:.0f}).")
+                best_row = df_merged[mask].iloc[best_idx]
+                new_center = {}
+                for param in search_space.bounds:
+                    col = NeighborhoodTemplateSelector._PARAM_TO_COL.get(param, param)
+                    val = pd.to_numeric(best_row.get(col, np.nan), errors="coerce")
+                    lo, hi = search_space.bounds[param]
+                    if np.isfinite(val):
+                        new_center[param] = float(np.clip(val, lo, hi))
+                trust_region.recenter(new_center)
+                print(f"  [TrustRegion] Recentered on best observed experiment.")
 
-        else:
-            # First iteration — use selector output to initialise trust region
-            if center is None:
-                print("  [TrustRegion] No similar neighbors found. "
-                      "Using global search space.")
-                using_trust_region = False
             else:
-                spread_lengths = []
-                for param, (lo, hi) in search_space.bounds.items():
-                    full_range = hi - lo
-                    if full_range > 0:
-                        spread_lengths.append(
-                            min(1.0, 2.0 * spread.get(param, full_range / 4) / full_range)
-                        )
-                init_length = float(np.clip(np.mean(spread_lengths)
-                                            if spread_lengths else 0.8,
-                                            0.3, 0.8))
-                # Compute per-parameter scales from neighbour spread.
-                # Tightly-clustered params → scale < 1 (narrow search).
-                # Widely-spread params    → scale > 1 (broader search).
-                param_scales = {}
-                for param, (lo, hi) in search_space.bounds.items():
-                    full_range = hi - lo
-                    if full_range > 0 and spread and param in spread:
-                        normalized_spread = spread[param] / max(full_range / 4.0, 1e-9)
-                        param_scales[param] = float(np.clip(normalized_spread, 0.5, 2.0))
-                    else:
-                        param_scales[param] = 1.0
+                # First iteration — use selector output to initialise trust region
+                if center is None:
+                    print("  [TrustRegion] No similar neighbors found. "
+                          "Using global search space.")
+                    using_trust_region = False
+                else:
+                    spread_lengths = []
+                    for param, (lo, hi) in search_space.bounds.items():
+                        full_range = hi - lo
+                        if full_range > 0:
+                            spread_lengths.append(
+                                min(1.0, 2.0 * spread.get(param, full_range / 4) / full_range)
+                            )
+                    init_length = float(np.clip(np.mean(spread_lengths)
+                                                if spread_lengths else 0.8,
+                                                0.3, 0.8))
+                    # Compute per-parameter scales from neighbour spread.
+                    param_scales = {}
+                    for param, (lo, hi) in search_space.bounds.items():
+                        full_range = hi - lo
+                        if full_range > 0 and spread and param in spread:
+                            normalized_spread = spread[param] / max(full_range / 4.0, 1e-9)
+                            param_scales[param] = float(np.clip(normalized_spread, 0.5, 2.0))
+                        else:
+                            param_scales[param] = 1.0
 
-                trust_region = TrustRegion(
-                    center=center,
-                    full_bounds=search_space.bounds,
-                    length=init_length,
-                    param_scales=param_scales,
-                )
-                print(f"  [TrustRegion] Initialised | length={init_length:.3f} | "
-                      f"param_scales={{{', '.join(f'{p}:{s:.2f}' for p,s in param_scales.items())}}}")
+                    trust_region = TrustRegion(
+                        center=center,
+                        full_bounds=search_space.bounds,
+                        length=init_length,
+                        param_scales=param_scales,
+                    )
+                    print(f"  [TrustRegion] Initialised | length={init_length:.3f} | "
+                          f"param_scales={{{', '.join(f'{p}:{s:.2f}' for p,s in param_scales.items())}}}")
 
-        if trust_region is not None:
-            override_bounds = trust_region.get_bounds()
-            print("  [TrustRegion] Search bounds:")
-            for p, (lo, hi) in override_bounds.items():
-                print(f"    {p}: [{lo:.3g}, {hi:.3g}]")
+            if trust_region is not None:
+                override_bounds = trust_region.get_bounds()
+                print("  [TrustRegion] Search bounds:")
+                for p, (lo, hi) in override_bounds.items():
+                    print(f"    {p}: [{lo:.3g}, {hi:.3g}]")
 
     # ── Chemistry template for featurizer ────────────────────────────────────
-    # Use the nearest-neighbor row (ref_idx) from the two-stage selector as the
-    # chemistry template.  This gives the surrogate the correct molecular context
-    # (metal / linker / modulator features) for the target chemistry, rather than
-    # defaulting to the dataset-median which may belong to a different metal family.
-    if using_trust_region and ref_idx is not None:
+    # Use the nearest-neighbor row (ref_idx) whenever any chemistry SMILES was
+    # provided — this fixes molecular features (linker / precursor / modulator
+    # descriptors) to the target chemistry so the surrogate scores process
+    # conditions for the right molecule, not the dataset median.
+    if ref_idx is not None:
         template_row = X_cv[ref_idx]
         print(f"  [Template] Using nearest neighbor idx={ref_idx} as chemistry template.")
     else:
@@ -1332,8 +1410,9 @@ def _run_recommend(args):
     acq_kwargs = {
         "f_best": f_best,
         "gamma": BO_BORE_GAMMA,
-        "random_state": RANDOM_STATE + iteration,
+        "random_state": RANDOM_STATE,
         "bore_adaptive_gamma": BO_BORE_ADAPTIVE_GAMMA,
+        "pi_ordinal_pipeline": pi_ordinal_pipeline,
     }
     acq_vals = _compute_acquisition(
         args.bo_acquisition, surrogate,
@@ -1354,7 +1433,65 @@ def _run_recommend(args):
     results["pxrd_predicted"] = mu
     results["uncertainty"]     = sigma
     results["acquisition_value"] = acq_vals
-    results = results.sort_values("acquisition_value", ascending=False)
+
+    # Use Kriging Believer to select a diverse batch within the (trust-region-
+    # filtered) candidate pool, then append remaining candidates sorted by
+    # acquisition value so the full CSV is still informative.
+    print(f"  [KrigingBeliever] Selecting {args.bo_batch_size} diverse candidates...")
+    batch_indices = BatchSelector.kriging_believer(
+        surrogate, X_cv, y_raw, X_candidates,
+        None, args.bo_acquisition, args.bo_batch_size,
+        **acq_kwargs,
+    )
+    kb_mask = np.zeros(len(candidates), dtype=bool)
+    kb_mask[batch_indices] = True
+    results_batch = results.iloc[batch_indices].copy()
+    results_batch["batch_rank"] = range(1, len(batch_indices) + 1)
+    results_rest  = results[~kb_mask].sort_values("acquisition_value", ascending=False)
+    results = pd.concat([results_batch, results_rest], ignore_index=True)
+
+    # Round controllable params to experimentally sensible precision
+    if "equivalents" in results.columns:
+        results["equivalents"] = results["equivalents"].round(0).astype(int)
+    if "total_conc" in results.columns:
+        results["total_conc"] = results["total_conc"].round(2)
+    if "temperature_k" in results.columns:
+        results["temperature_k"] = results["temperature_k"].round(0).astype(int)
+
+    # Mark single-solvent rows with explicit "NA" in solvent_2
+    if "solvent_2" in results.columns:
+        no_sol2 = results["solvent_2"].isna() | (results["solvent_2"].astype(str).str.strip() == "")
+        results.loc[no_sol2, "solvent_2"] = "NA"
+
+    # Snap phi_1 to nearest experimentally practical value (binary-solvent rows)
+    if "phi_1" in results.columns:
+        _phi_allowed = np.array([0.0, 0.25, 0.4, 0.5, 0.6, 0.75, 1.0])
+        results["phi_1"] = results["phi_1"].apply(
+            lambda v: _phi_allowed[np.argmin(np.abs(_phi_allowed - v))]
+        )
+
+    # After snapping, force single-solvent rows to phi_1=1.0;
+    # and if phi_1 snapped to 1.0, solvent_2 contributes nothing — show NA.
+    if "phi_1" in results.columns:
+        if "solvent_2" in results.columns:
+            results.loc[results["solvent_2"] == "NA", "phi_1"] = 1.0
+            results.loc[results["phi_1"] == 1.0, "solvent_2"] = "NA"
+        else:
+            # No solvent_2 column at all — all rows are single-solvent
+            results["solvent_2"] = "NA"
+            results["phi_1"] = 1.0
+
+    # Compute linker and modulator amounts for a 2 mL synthesis
+    _display_vol_ml = 2.0
+    if "total_conc" in results.columns:
+        _ratio = results["metal_over_linker_ratio"].values if "metal_over_linker_ratio" in results.columns else np.ones(len(results))
+        _ratio = np.where(_ratio > 0, _ratio, 1.0)
+        _umol_metal  = results["total_conc"].values * _ratio / (1.0 + _ratio) * _display_vol_ml
+        _umol_linker = results["total_conc"].values / (1.0 + _ratio) * _display_vol_ml
+        _equiv = results["equivalents"].values.astype(float) if "equivalents" in results.columns else np.ones(len(results))
+        _umol_mod = _equiv * _umol_metal
+        results["linker_umol"]    = np.round(_umol_linker, 2)
+        results["modulator_umol"] = np.round(_umol_mod, 2)
 
     # 7. Output
     os.makedirs("docs", exist_ok=True)
@@ -1362,9 +1499,10 @@ def _run_recommend(args):
     results.head(100).to_csv(out_path, index=False)
 
     print(f"\n── Iteration {iteration} — Top recommendations ──")
-    top_cols = ["equivalents", "temperature_k", "metal_over_linker_ratio",
-                "total_conc", "solvent_1", "pxrd_predicted", "uncertainty",
-                "acquisition_value"]
+    print(f"   (linker_umol and modulator_umol are for {_display_vol_ml:.0f} mL of solvent)")
+    top_cols = ["batch_rank", "equivalents", "temperature_k", "metal_over_linker_ratio",
+                "linker_umol", "modulator_umol", "solvent_1", "solvent_2", "phi_1",
+                "pxrd_predicted", "uncertainty", "acquisition_value"]
     display_cols = [c for c in top_cols if c in results.columns]
     print(results[display_cols].head(10).to_string(index=False))
     print(f"\n  Full results saved → {out_path}")
@@ -1386,10 +1524,17 @@ def _run_recommend(args):
                                  if trust_region is not None else None)
     checkpointer.save("recommend_state", state)
 
-    tr_flag = " --bo-precursor <SMILES> --bo-linker <SMILES>" if using_trust_region else ""
+    chem_flags = ""
+    if args.bo_linker:
+        chem_flags += f" --bo-linker '{args.bo_linker}'"
+    if args.bo_precursor:
+        chem_flags += f" --bo-precursor '{args.bo_precursor}'"
+    if args.bo_modulator:
+        chem_flags += f" --bo-modulator '{args.bo_modulator}'"
     print(f"\n  State saved. Next: synthesize top candidates, add results to data file,")
     print(f"  then run again:  python main.py --bo --bo-mode recommend "
-          f"--bo-surrogate {args.bo_surrogate}{tr_flag}")
+          f"--bo-surrogate {args.bo_surrogate} --bo-batch-size {args.bo_batch_size}"
+          f"{chem_flags}")
 
 
 def run_bo_ablation(args):
@@ -1677,6 +1822,10 @@ if __name__ == "__main__":
                         help="Linker SMILES for recommend mode")
     parser.add_argument("--bo-modulator", type=str, default=None,
                         help="Modulator SMILES for recommend mode")
+    parser.add_argument("--bo-observed-pairs", action="store_true",
+                        help="Restrict solvent search space to (sol1, sol2) pairs "
+                             "observed together in training data. Default: all "
+                             "combinations of individually-used solvents.")
 
     args = parser.parse_args()
 
