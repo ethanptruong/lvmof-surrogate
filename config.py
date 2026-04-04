@@ -362,8 +362,7 @@ _COORD_KEYS = ["COOH", "COO_neg", "py_N", "amine_prim",
 
 # ── Bayesian Optimization ────────────────────────────────────────────────────
 BO_DEFAULT_ACQUISITION = "lfbo"
-BO_BORE_GAMMA          = 0.25
-BO_LCB_KAPPA           = 2.0
+BO_LFBO_GAMMA          = 0.25
 BO_EI_XI               = 0.01
 BO_N_ITERATIONS        = 50
 BO_BATCH_SIZE          = 3
@@ -373,9 +372,7 @@ BO_EPSILON_GREEDY      = 0.1
 BO_N_LHS_SAMPLES       = 1000
 BO_DEFAULT_SURROGATE   = "rf_cl_mi"
 BO_BOOTSTRAP_M         = 50
-BO_BORE_ADAPTIVE_GAMMA = True   # anneal gamma from BO_BORE_GAMMA → 0.10 over the campaign
-BO_SSL_ALPHA           = 0.2    # down-weight factor for pseudo-labeled candidates (DRE-BO-SSL)
-BO_SSL_N_PSEUDO        = 20     # pseudo-labeled candidates added per BORE/LFBO iteration
+BO_LFBO_ADAPTIVE_GAMMA = True   # anneal gamma from BO_LFBO_GAMMA → 0.10 over the campaign
 BO_CLUSTER_DIV_LAMBDA  = 2.0    # strength of chemistry-cluster diversity penalty (simulation only)
                                  # 0 = disabled; higher = stronger push toward unexplored clusters
 
@@ -394,3 +391,4 @@ BO_OPTIONAL_PARAMS = {
 BO_TOTAL_CONC_CLIP_PERCENTILES = (5, 95)
 BO_LOG_SCALE_PARAMS            = ["total_conc"]
 TOTAL_VOLUME_ML = 2.0   # fixed synthesis volume for BO candidate featurization
+BO_LINKER_UMOL_BOUNDS = (10.0, 25.0)  # hard constraint on linker µmol per synthesis

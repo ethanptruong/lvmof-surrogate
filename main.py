@@ -20,11 +20,11 @@ import pandas as pd
 
 from config import (COLMAP, N_CLUSTERS, RANDOM_STATE, XGB_TUNED_KEYS,
                     BO_N_ITERATIONS, BO_BATCH_SIZE, BO_INIT_FRACTION,
-                    BO_BORE_GAMMA, BO_CHECKPOINT_DIR, BO_DEFAULT_SURROGATE,
+                    BO_LFBO_GAMMA, BO_CHECKPOINT_DIR, BO_DEFAULT_SURROGATE,
                     BO_DEFAULT_ACQUISITION, BO_CONTROLLABLE_PARAMS,
                     TARGET_METALS, METAL_BLOCK_DIM, COLIGAND_BLOCK_DIM,
                     COMPLEX_BLOCK_DIM, TOTAL_VOLUME_ML,
-                    BO_BORE_ADAPTIVE_GAMMA, BO_SSL_ALPHA, BO_SSL_N_PSEUDO)
+                    BO_LFBO_ADAPTIVE_GAMMA, BO_LINKER_UMOL_BOUNDS)
 from data_processing import load_data, build_inventory, merge_data, run_process_variable_audit, fix_missingness
 from feature_assembly import (assemble_features, build_feature_catalog,
                                build_discrete_mask,
@@ -598,24 +598,14 @@ def run_bo(args):
     surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
                                    ranking_target=args.bo_ranking_target)
 
-    # Optional classifier pipeline for PI-ordinal baseline
-    classifier_pipeline = None
-    if args.bo_acquisition == "pi_ordinal":
-        from models import make_rf_pipe
-        rf_params = ck_params.get("best_rf_mi_params", {"n_estimators": 300, "max_depth": 10,
-                                   "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"})
-        classifier_pipeline = make_rf_pipe(rf_params, with_cl=False)
-        classifier_pipeline.fit(X_cv, y_remapped)
-
     bo = BOLoop(
         surrogate=surrogate,
         acquisition_name=args.bo_acquisition,
         batch_strategy=args.bo_batch_strategy,
         batch_size=args.bo_batch_size,
         n_iterations=args.bo_iterations,
-        classifier_pipeline=classifier_pipeline,
         random_state=RANDOM_STATE,
-        bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+        lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
     )
 
     checkpointer = BOCheckpointer()
@@ -677,7 +667,7 @@ def run_bo(args):
                   f"(0 = perfect)")
             if cal["calibration_error"] > 0.10:
                 print("  NOTE: calibration error > 0.10 — sigma estimates are "
-                      "unreliable. EI/LCB acquisition scores may be misleading.")
+                      "unreliable. EI acquisition scores may be misleading.")
         plot_calibration(cal, surrogate_name=args.bo_surrogate,
                          save_path=f"docs/bo_calibration_{label}.png")
 
@@ -762,24 +752,12 @@ def _run_evaluate(args):
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
                                        ranking_target=args.bo_ranking_target)
 
-        # Classifier pipeline for pi_ordinal
-        clf = None
-        if args.bo_acquisition == "pi_ordinal":
-            from models import make_rf_pipe
-            rf_params = ck_params.get("best_rf_mi_params", {
-                "n_estimators": 300, "max_depth": 10,
-                "min_samples_split": 5, "min_samples_leaf": 3,
-                "max_features": "sqrt"})
-            clf = make_rf_pipe(rf_params, with_cl=False)
-            clf.fit(X_cv, y_remapped)
-
         bo = BOLoop(
             surrogate=surrogate,
             acquisition_name=args.bo_acquisition,
             n_iterations=args.bo_iterations,
-            classifier_pipeline=clf,
             random_state=seed,
-            bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+            lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
         )
         history = bo.run_simulation(X_cv, y_raw, groups=groups)
 
@@ -870,7 +848,7 @@ def _run_evaluate(args):
               f"(0 = perfect)")
         if cal["calibration_error"] > 0.10:
             print("  NOTE: calibration error > 0.10 — sigma estimates are "
-                  "unreliable. EI/LCB acquisition scores may be misleading.")
+                  "unreliable. EI acquisition scores may be misleading.")
     plot_calibration(cal, surrogate_name=args.bo_surrogate,
                      save_path=f"docs/bo_calibration_{label}.png")
 
@@ -910,23 +888,12 @@ def _run_loco(args):
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
                                        ranking_target=args.bo_ranking_target)
 
-        clf = None
-        if args.bo_acquisition == "pi_ordinal":
-            from models import make_rf_pipe
-            rf_params = ck_params.get("best_rf_mi_params", {
-                "n_estimators": 300, "max_depth": 10,
-                "min_samples_split": 5, "min_samples_leaf": 3,
-                "max_features": "sqrt"})
-            clf = make_rf_pipe(rf_params, with_cl=False)
-            clf.fit(X_cv, y_remapped)
-
         bo = BOLoop(
             surrogate=surrogate,
             acquisition_name=args.bo_acquisition,
             n_iterations=args.bo_iterations,
-            classifier_pipeline=clf,
             random_state=RANDOM_STATE,
-            bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+            lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
         )
         history = bo.run_simulation_loco(X_cv, y_raw, groups, held_out_cluster=cid)
 
@@ -1047,23 +1014,12 @@ def _run_learning_curve(args):
         for seed in seeds:
             surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
                                            ranking_target=args.bo_ranking_target)
-            clf = None
-            if args.bo_acquisition == "pi_ordinal":
-                from models import make_rf_pipe
-                rf_params = ck_params.get("best_rf_mi_params", {
-                    "n_estimators": 300, "max_depth": 10,
-                    "min_samples_split": 5, "min_samples_leaf": 3,
-                    "max_features": "sqrt"})
-                clf = make_rf_pipe(rf_params, with_cl=False)
-                clf.fit(X_cv, y_remapped)
-
             bo = BOLoop(
                 surrogate=surrogate,
                 acquisition_name=args.bo_acquisition,
                 n_iterations=args.bo_iterations,
-                classifier_pipeline=clf,
                 random_state=seed,
-                bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+                lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
             )
             history = bo.run_simulation(X_cv, y_raw, init_fraction=frac,
                                         groups=groups)
@@ -1164,7 +1120,8 @@ def _run_recommend(args):
     from bo_core import (BOLoop, BOCheckpointer, SearchSpace,
                          CandidateFeaturizer, _compute_acquisition,
                          NeighborhoodTemplateSelector, TrustRegion,
-                         FeasibilityScorer, BatchSelector)
+                         FeasibilityScorer, BatchSelector,
+                         compute_stoichiometric_ratio)
     from config import BO_OPTIONAL_PARAMS
 
     print("\n" + "=" * 70)
@@ -1217,17 +1174,6 @@ def _run_recommend(args):
               "With XGB it falls back to deterministic predict() (no exploration). "
               "Switch to an rf_* surrogate or a different acquisition function.")
 
-    # Build classifier pipeline for pi_ordinal acquisition
-    pi_ordinal_pipeline = None
-    if args.bo_acquisition == "pi_ordinal":
-        from models import make_rf_pipe
-        rf_params = ck_params.get("best_rf_mi_params", {
-            "n_estimators": 300, "max_depth": 10,
-            "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"})
-        pi_ordinal_pipeline = make_rf_pipe(rf_params, with_cl=False)
-        pi_ordinal_pipeline.fit(X_cv, y_remapped)
-        print("  [pi_ordinal] Classifier pipeline fitted.")
-
     # 4. Build search space
     extra_params = BO_OPTIONAL_PARAMS if args.bo_include_mlr else None
     controllable = list(BO_CONTROLLABLE_PARAMS.keys())
@@ -1274,6 +1220,7 @@ def _run_recommend(args):
     trust_region = None
     override_bounds = None
     ref_idx = None   # chemistry template — nearest neighbor in dataset
+    fixed_ratio = None  # stoichiometric metal/linker ratio from phosphine counts
 
     if has_chemistry_input:
         linker_str    = args.bo_linker    or ""
@@ -1286,6 +1233,13 @@ def _run_recommend(args):
               f"{precursor_str[:60] or '(not specified)'}")
         if modulator_str:
             print(f"  [Chemistry] Target modulator: {modulator_str[:60]}")
+
+        # Compute stoichiometric metal/linker ratio from phosphine counts.
+        if linker_str and precursor_str:
+            fixed_ratio = compute_stoichiometric_ratio(precursor_str, linker_str)
+            if fixed_ratio is not None:
+                print(f"  [Chemistry] Fixed metal/linker ratio = {fixed_ratio:.4g} "
+                      f"(from SMILES phosphine counts)")
 
         selector = NeighborhoodTemplateSelector(
             df_train=df_merged[mask],
@@ -1388,11 +1342,60 @@ def _run_recommend(args):
     else:
         template_row = np.nanmedian(X_cv, axis=0)
 
+    # ── Resolve fixed metal/linker ratio (when not a BO parameter) ──────────
+    # Fallback chain: explicit SMILES → ref row SMILES → ref row data → median
+    if not args.bo_include_mlr and fixed_ratio is None:
+        df_train = df_merged[mask]
+        if ref_idx is not None:
+            ref_row = df_train.iloc[ref_idx]
+            fixed_ratio = compute_stoichiometric_ratio(
+                ref_row.get('smiles_precursor', ''),
+                ref_row.get('smiles_linker_1', ''),
+            )
+            if fixed_ratio is not None:
+                print(f"  [Chemistry] Fixed metal/linker ratio = {fixed_ratio:.4g} "
+                      f"(from nearest-neighbor phosphine counts)")
+        if fixed_ratio is None and ref_idx is not None:
+            existing = ref_row.get('metal_over_linker_ratio', np.nan)
+            if pd.notna(existing):
+                fixed_ratio = float(existing)
+                print(f"  [Chemistry] Fixed metal/linker ratio = {fixed_ratio:.4g} "
+                      f"(from nearest-neighbor experimental data)")
+        if fixed_ratio is None:
+            fixed_ratio = float(df_train['metal_over_linker_ratio'].median())
+            print(f"  [Chemistry] Fixed metal/linker ratio = {fixed_ratio:.4g} "
+                  f"(dataset median)")
+
     # 5. Generate candidates (within trust region if active)
     candidates = search_space.generate_lhs_candidates(
         seed=RANDOM_STATE + iteration,
         override_bounds=override_bounds,
     )
+
+    # Apply fixed ratio to all candidates when it is not a BO search parameter.
+    if not args.bo_include_mlr and fixed_ratio is not None:
+        candidates["metal_over_linker_ratio"] = fixed_ratio
+
+    # ── Clip total_conc so linker µmol stays within bounds ────────────────
+    # linker_umol = total_conc * volume / (1 + ratio + equiv)
+    # → total_conc = linker_umol * (1 + ratio + equiv) / volume
+    if "total_conc" in candidates.columns:
+        _lo_umol, _hi_umol = BO_LINKER_UMOL_BOUNDS
+        _r = candidates.get("metal_over_linker_ratio",
+                            pd.Series(np.ones(len(candidates)))).values.astype(float)
+        _r = np.where(_r > 0, _r, 1.0)
+        _e = candidates.get("equivalents",
+                            pd.Series(np.ones(len(candidates)))).values.astype(float)
+        _tc_lo = _lo_umol * (1.0 + _r + _e) / TOTAL_VOLUME_ML
+        _tc_hi = _hi_umol * (1.0 + _r + _e) / TOTAL_VOLUME_ML
+        _before = candidates["total_conc"].values.copy()
+        candidates["total_conc"] = np.clip(candidates["total_conc"].values,
+                                           _tc_lo, _tc_hi)
+        _n_clipped = int((_before != candidates["total_conc"].values).sum())
+        if _n_clipped > 0:
+            print(f"  [Concentration] Clipped {_n_clipped}/{len(candidates)} candidates "
+                  f"to keep linker µmol in [{_lo_umol:.0f}, {_hi_umol:.0f}] "
+                  f"(vol={TOTAL_VOLUME_ML:.0f} mL)")
 
     featurizer = CandidateFeaturizer(
         template_row=template_row,
@@ -1409,10 +1412,9 @@ def _run_recommend(args):
 
     acq_kwargs = {
         "f_best": f_best,
-        "gamma": BO_BORE_GAMMA,
+        "gamma": BO_LFBO_GAMMA,
         "random_state": RANDOM_STATE,
-        "bore_adaptive_gamma": BO_BORE_ADAPTIVE_GAMMA,
-        "pi_ordinal_pipeline": pi_ordinal_pipeline,
+        "lfbo_adaptive_gamma": BO_LFBO_ADAPTIVE_GAMMA,
     }
     acq_vals = _compute_acquisition(
         args.bo_acquisition, surrogate,
@@ -1434,20 +1436,40 @@ def _run_recommend(args):
     results["uncertainty"]     = sigma
     results["acquisition_value"] = acq_vals
 
-    # Use Kriging Believer to select a diverse batch within the (trust-region-
-    # filtered) candidate pool, then append remaining candidates sorted by
-    # acquisition value so the full CSV is still informative.
-    print(f"  [KrigingBeliever] Selecting {args.bo_batch_size} diverse candidates...")
-    batch_indices = BatchSelector.kriging_believer(
-        surrogate, X_cv, y_raw, X_candidates,
-        None, args.bo_acquisition, args.bo_batch_size,
-        **acq_kwargs,
-    )
+    # Select a batch from the candidate pool, then append remaining candidates
+    # sorted by acquisition value so the full CSV is still informative.
+    if args.bo_batch_strategy == "diverse_greedy":
+        print(f"  [DiverseGreedy] Selecting {args.bo_batch_size} candidates "
+              f"(lambda={args.bo_diversity_lambda}) ...")
+        batch_indices, combined_scores = BatchSelector.diverse_greedy(
+            surrogate, X_cv, y_raw, X_candidates,
+            candidates, args.bo_acquisition, args.bo_batch_size,
+            diversity_lambda=args.bo_diversity_lambda,
+            **acq_kwargs,
+        )
+        results["diversity_combined_score"] = combined_scores
+    elif args.bo_batch_strategy == "kriging_believer":
+        print(f"  [KrigingBeliever] Selecting {args.bo_batch_size} candidates...")
+        batch_indices = BatchSelector.kriging_believer(
+            surrogate, X_cv, y_raw, X_candidates,
+            None, args.bo_acquisition, args.bo_batch_size,
+            **acq_kwargs,
+        )
+    else:  # constant_liar
+        print(f"  [ConstantLiar] Selecting {args.bo_batch_size} candidates...")
+        batch_indices = BatchSelector.constant_liar(
+            surrogate, X_cv, y_raw, X_candidates,
+            None, args.bo_acquisition, args.bo_batch_size,
+            f_best, **acq_kwargs,
+        )
+
     kb_mask = np.zeros(len(candidates), dtype=bool)
     kb_mask[batch_indices] = True
     results_batch = results.iloc[batch_indices].copy()
     results_batch["batch_rank"] = range(1, len(batch_indices) + 1)
-    results_rest  = results[~kb_mask].sort_values("acquisition_value", ascending=False)
+    _rest = results[~kb_mask].copy()
+    _rest["_pxrd_r"] = _rest["pxrd_predicted"].round(2)
+    results_rest = _rest.sort_values(["_pxrd_r", "uncertainty"], ascending=[False, True]).drop(columns=["_pxrd_r"])
     results = pd.concat([results_batch, results_rest], ignore_index=True)
 
     # Round controllable params to experimentally sensible precision
@@ -1486,10 +1508,12 @@ def _run_recommend(args):
     if "total_conc" in results.columns:
         _ratio = results["metal_over_linker_ratio"].values if "metal_over_linker_ratio" in results.columns else np.ones(len(results))
         _ratio = np.where(_ratio > 0, _ratio, 1.0)
-        _umol_metal  = results["total_conc"].values * _ratio / (1.0 + _ratio) * _display_vol_ml
-        _umol_linker = results["total_conc"].values / (1.0 + _ratio) * _display_vol_ml
         _equiv = results["equivalents"].values.astype(float) if "equivalents" in results.columns else np.ones(len(results))
-        _umol_mod = _equiv * _umol_metal
+        _denom       = 1.0 + _ratio + _equiv
+        _umol_linker = results["total_conc"].values / _denom * _display_vol_ml
+        _umol_metal  = _ratio * _umol_linker
+        _umol_mod    = _equiv * _umol_linker
+        results["precursor_umol"] = np.round(_umol_metal, 2)
         results["linker_umol"]    = np.round(_umol_linker, 2)
         results["modulator_umol"] = np.round(_umol_mod, 2)
 
@@ -1499,9 +1523,12 @@ def _run_recommend(args):
     results.head(100).to_csv(out_path, index=False)
 
     print(f"\n── Iteration {iteration} — Top recommendations ──")
-    print(f"   (linker_umol and modulator_umol are for {_display_vol_ml:.0f} mL of solvent)")
-    top_cols = ["batch_rank", "equivalents", "temperature_k", "metal_over_linker_ratio",
-                "linker_umol", "modulator_umol", "solvent_1", "solvent_2", "phi_1",
+    print(f"   (precursor_umol, linker_umol, modulator_umol are for {_display_vol_ml:.0f} mL of solvent)")
+    top_cols = ["batch_rank",
+                "solvent_1", "solvent_2", "phi_1",
+                "temperature_k", "equivalents",
+                "total_conc", "metal_over_linker_ratio",
+                "precursor_umol", "linker_umol", "modulator_umol",
                 "pxrd_predicted", "uncertainty", "acquisition_value"]
     display_cols = [c for c in top_cols if c in results.columns]
     print(results[display_cols].head(10).to_string(index=False))
@@ -1541,19 +1568,20 @@ def run_bo_ablation(args):
     """Structured ablation study.
 
     Design rationale:
-      - BORE, random, pi_ordinal do not use the regression surrogate for
+      - LFBO, random do not use the regression surrogate for
         acquisition scoring, so varying the surrogate with these methods
         produces identical results.  They are run once per seed with a
         fixed surrogate (args.bo_surrogate).
-      - EI, LCB, Thompson directly consume surrogate (mu, sigma), so they
-        are crossed with all six surrogates × three seeds.
+      - EI, Thompson, Consensus directly consume surrogate (mu, sigma),
+        so they are crossed with all six surrogates × three seeds.
+        Consensus runs both EI and LFBO, intersects their top-K picks,
+        and falls back to pure LFBO when no overlap exists.
       - Calibration is evaluated once per surrogate using the seed=42 init
         split from the EI runs (EI uses sigma, so its init split is the
         most relevant reference).
 
-    Total runs: 3 agnostic × 3 seeds  +  3 sensitive × 6 surrogates × 3 seeds
-               + 2 batch strategies  =  9 + 54 + 2 = 65 runs
-    (vs 108 in the old design, which wasted 50% on redundant BORE/random combos)
+    Total runs: 2 agnostic × 3 seeds  +  3 sensitive × 6 surrogates × 3 seeds
+               + 1-2 batch strategies  =  6 + 54 + 1..2 = 61..62 runs
     """
     from bo_core import BOLoop
     from bo_metrics import (SimulationMetrics, plot_convergence, plot_average_score,
@@ -1574,15 +1602,13 @@ def run_bo_ablation(args):
     groups, group_names = compute_chemistry_groups(df_merged)
 
     # Acquisitions that do not use regression surrogate mu/sigma for scoring.
-    # "lfbo" and "lfbo_ssl" are BORE variants: same classifier approach, but
-    # lfbo recovers EI (not PI) and lfbo_ssl adds semi-supervised regularisation.
-    SURROGATE_AGNOSTIC = ["bore", "lfbo", "lfbo_ssl", "random", "pi_ordinal"]
+    SURROGATE_AGNOSTIC = ["lfbo", "random"]
     # Acquisitions that consume surrogate mu/sigma — cross with all surrogates
-    SURROGATE_SENSITIVE = ["ei", "lcb", "thompson"]
+    SURROGATE_SENSITIVE = ["ei", "thompson", "consensus"]
 
     surrogates = ["rf_mi", "xgb_mi", "rf_cl_mi", "xgb_cl_mi",
                   "rf_cl_only", "xgb_cl_only"]
-    batch_strategies = ["constant_liar", "kriging_believer"]
+    from bo_core import VALID_BATCH_STRATEGIES
     seeds = [42, 123, 456]
 
     all_histories = []
@@ -1590,19 +1616,10 @@ def run_bo_ablation(args):
     all_summaries = []
 
     # ── 1. Surrogate-agnostic acquisitions ────────────────────────────────────
-    # pi_ordinal uses a separate classifier pipeline, fit once here.
-    pi_classifier = None
-    from models import make_rf_pipe as _make_rf_pipe
-    rf_params = ck_params.get("best_rf_mi_params", {
-        "n_estimators": 300, "max_depth": 10,
-        "min_samples_split": 5, "min_samples_leaf": 3, "max_features": "sqrt"})
-    pi_classifier = _make_rf_pipe(rf_params, with_cl=False)
-    pi_classifier.fit(X_cv, y_remapped)
     print(f"\n── Surrogate-agnostic acquisitions (fixed surrogate: {args.bo_surrogate}) ──")
 
     for acq in SURROGATE_AGNOSTIC:
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
-        clf = pi_classifier if acq == "pi_ordinal" else None
         for seed in seeds:
             label = f"{acq}|seed={seed}"
             print(f"\n── {label} ──")
@@ -1610,9 +1627,8 @@ def run_bo_ablation(args):
                 surrogate=surrogate,
                 acquisition_name=acq,
                 n_iterations=args.bo_iterations,
-                classifier_pipeline=clf,
                 random_state=seed,
-                bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+                lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
             )
             history = bo.run_simulation(X_cv, y_raw, groups=groups)
             metrics = SimulationMetrics(y_raw)
@@ -1624,7 +1640,7 @@ def run_bo_ablation(args):
                   f"Top-5%={summary['Top_percent_final']*100:.1f}%")
 
     # ── 2. Surrogate-sensitive acquisitions ───────────────────────────────────
-    print(f"\n── Surrogate-sensitive acquisitions (EI / LCB / Thompson) ──")
+    print(f"\n── Surrogate-sensitive acquisitions (EI / Thompson) ──")
 
     # Track one history per surrogate (seed=42, ei) for calibration later
     calibration_histories = {}
@@ -1640,7 +1656,7 @@ def run_bo_ablation(args):
                     acquisition_name=acq,
                     n_iterations=args.bo_iterations,
                     random_state=seed,
-                    bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+                    lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
                 )
                 history = bo.run_simulation(X_cv, y_raw, groups=groups)
                 metrics = SimulationMetrics(y_raw)
@@ -1665,19 +1681,18 @@ def run_bo_ablation(args):
     best_acq = max(acq_af, key=lambda a: np.mean(acq_af[a]))
     print(f"  Best acquisition by mean AF: {best_acq}")
 
-    # For batch, use args.bo_surrogate (sensible for both BORE and sensitive acqs)
+    # For batch, use args.bo_surrogate — only valid strategies for best_acq
+    batch_strategies = VALID_BATCH_STRATEGIES.get(best_acq, ["diverse_greedy"])
     for strat in batch_strategies:
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
-        clf = pi_classifier if best_acq == "pi_ordinal" else None
         bo = BOLoop(
             surrogate=surrogate,
             acquisition_name=best_acq,
             batch_strategy=strat,
             batch_size=args.bo_batch_size,
             n_iterations=args.bo_iterations,
-            classifier_pipeline=clf,
             random_state=RANDOM_STATE,
-            bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+            lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
         )
         history = bo.run_batch(X_cv, y_raw, groups=groups)
         label = f"batch|{best_acq}|{strat}"
@@ -1783,15 +1798,19 @@ if __name__ == "__main__":
                                  "rf_cl_only", "xgb_cl_only"],
                         help="BO regression surrogate (matches classification pipeline variants)")
     parser.add_argument("--bo-acquisition", type=str, default=BO_DEFAULT_ACQUISITION,
-                        choices=["bore", "lfbo", "lfbo_ssl",
-                                 "ei", "lcb", "pi_ordinal", "thompson", "random"],
+                        choices=["lfbo", "ei", "thompson", "random", "consensus"],
                         help="Acquisition function. "
-                             "bore=original BORE (recovers PI); "
-                             "lfbo=LFBO-EI weighted classifier (Song et al. ICML 2022, recovers EI); "
-                             "lfbo_ssl=LFBO-EI + semi-supervised pseudo-labeling (DRE-BO-SSL 2023).")
-    parser.add_argument("--bo-batch-strategy", type=str, default="constant_liar",
-                        choices=["constant_liar", "kriging_believer"],
-                        help="Batch selection strategy")
+                             "lfbo=LFBO-EI weighted classifier (Song et al. ICML 2022, recovers EI). "
+                             "consensus=EI∩LFBO rank-intersection, falls back to LFBO.")
+    parser.add_argument("--bo-batch-strategy", type=str, default=None,
+                        choices=["constant_liar", "kriging_believer", "diverse_greedy"],
+                        help="Batch selection strategy (auto-selected if omitted). "
+                             "EI supports constant_liar (pessimistic, more diverse) "
+                             "and kriging_believer (optimistic, more exploitative). "
+                             "LFBO/thompson/random use diverse_greedy automatically.")
+    parser.add_argument("--bo-diversity-lambda", type=float, default=0.3,
+                        help="Diversity weight for diverse_greedy batch selection "
+                             "(0=pure quality, 1=pure diversity; default 0.3).")
     parser.add_argument("--bo-batch-size", type=int, default=BO_BATCH_SIZE,
                         help="Batch size for batch BO mode")
     parser.add_argument("--bo-iterations", type=int, default=BO_N_ITERATIONS,
@@ -1828,6 +1847,13 @@ if __name__ == "__main__":
                              "combinations of individually-used solvents.")
 
     args = parser.parse_args()
+
+    # Auto-resolve batch strategy based on acquisition function
+    if args.bo:
+        from bo_core import resolve_batch_strategy
+        args.bo_batch_strategy = resolve_batch_strategy(
+            args.bo_acquisition, args.bo_batch_strategy
+        )
 
     if args.bo:
         if args.bo_ablation:

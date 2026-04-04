@@ -60,19 +60,31 @@ class SimulationMetrics:
         self.top_k_threshold = self.y_all[sorted_idx[k - 1]]
         self.k = k
 
-    def acceleration_factor(self, selected_indices, n_init):
-        """AF = (fraction of top-k found) / (fraction of pool evaluated).
+    def acceleration_factor(self, selected_indices, n_init, init_indices=None):
+        """AF = (fraction of pool-top-k found) / (fraction of pool evaluated).
 
-        AF > 1 means BO is finding top experiments faster than random.
+        Top-k is restricted to candidates actually in the pool (excluding init),
+        so random selection has an expected AF of 1.0.
         """
         n_evaluated = len(selected_indices)
         if n_evaluated == 0:
             return 0.0
+
+        # Restrict top-k to members in the pool (not the init set)
+        if init_indices is not None:
+            init_set = set(init_indices)
+            pool_topk = self.top_k_indices - init_set
+        else:
+            pool_topk = self.top_k_indices
+        k_pool = len(pool_topk)
+        if k_pool == 0:
+            return 0.0
+
         n_pool = self.n_total - n_init
         frac_evaluated = n_evaluated / max(n_pool, 1)
 
-        found = sum(1 for idx in selected_indices if idx in self.top_k_indices)
-        frac_found = found / self.k
+        found = sum(1 for idx in selected_indices if idx in pool_topk)
+        frac_found = found / k_pool
 
         return frac_found / frac_evaluated if frac_evaluated > 0 else 0.0
 
@@ -90,23 +102,25 @@ class SimulationMetrics:
         return y_selected.mean() / mean_all
 
     def top_percent_curve(self, history):
-        """Compute fraction of top-k discovered vs iteration.
+        """Compute fraction of pool-top-k discovered vs iteration.
 
+        Only counts top-k members that were in the pool (not init).
         Returns arrays (iterations, frac_discovered).
         """
+        init_set = set(history.get("init_indices", []))
+        pool_topk = self.top_k_indices - init_set
+        k_pool = len(pool_topk)
+        if k_pool == 0:
+            iters = list(range(1, len(history["selected_indices"]) + 1))
+            return np.array(iters), np.zeros(len(iters))
+
         found = set()
         fracs = []
-        init_indices = set(history.get("init_indices", []))
 
-        # Check init set
-        for idx in init_indices:
-            if idx in self.top_k_indices:
+        for idx in history["selected_indices"]:
+            if idx in pool_topk:
                 found.add(idx)
-
-        for i, idx in enumerate(history["selected_indices"]):
-            if idx in self.top_k_indices:
-                found.add(idx)
-            fracs.append(len(found) / self.k)
+            fracs.append(len(found) / k_pool)
 
         iterations = list(range(1, len(fracs) + 1))
         return np.array(iterations), np.array(fracs)
@@ -134,8 +148,9 @@ class SimulationMetrics:
     def summary(self, history):
         """Return dict with all metrics for a single run."""
         sel = history["selected_indices"]
-        n_init = len(history.get("init_indices", []))
-        af = self.acceleration_factor(sel, n_init)
+        init_indices = history.get("init_indices", [])
+        n_init = len(init_indices)
+        af = self.acceleration_factor(sel, n_init, init_indices=init_indices)
         ef = self.enhancement_factor(sel)
         _, top_curve = self.top_percent_curve(history)
         final_top = top_curve[-1] if len(top_curve) > 0 else 0.0

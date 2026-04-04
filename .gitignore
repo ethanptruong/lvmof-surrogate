@@ -10,3 +10,7 @@ build/
 data/
 .env
 .DS_Store
+.venv/
+.claude/
+checkpoints/
+references/

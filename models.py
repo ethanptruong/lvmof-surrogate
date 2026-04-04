@@ -309,7 +309,6 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def _seed(self):
-        np.random.seed(self.random_state)
         torch.manual_seed(self.random_state)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(self.random_state)
@@ -368,7 +367,7 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
                 ds,
                 batch_size=self.batch_size,
                 shuffle=True,
-                drop_last=False,
+                drop_last=True,
                 generator=gen,
             )
 
@@ -385,7 +384,7 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
             ds,
             batch_size=self.batch_size,
             sampler=sampler,
-            drop_last=False,
+            drop_last=True,
             generator=gen,
         )
 

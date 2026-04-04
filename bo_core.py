@@ -6,11 +6,10 @@ Classes:
   SearchSpace            — LHS candidate generation over continuous + discrete params
   RegressionSurrogate    — wraps RF/XGB regressor, exposes (mu, sigma)
   XGBoostBootstrapEnsemble — M bootstrap XGB regressors for uncertainty
-  OrdinalBOObjective     — raw 0-9 pxrd_score objective, BORE label generation
+  OrdinalBOObjective     — raw 0-9 pxrd_score objective, LFBO label generation
   EIAcquisition          — Expected Improvement
-  BOREAcquisition        — dynamic-tau BORE (Tiao et al.)
-  LCBAcquisition         — Lower Confidence Bound
-  PIordinalAcquisition   — P(Crystalline) from Frank-Hall (static baseline)
+  LFBOAcquisition        — LFBO-EI classifier (Song et al.)
+  _consensus_acquisition — EI ∩ LFBO rank-intersection; falls back to LFBO
   ThompsonSamplingAcquisition — sample from RF tree ensemble
   BatchSelector          — constant_liar and kriging_believer
   CandidateFeaturizer    — fixed chemistry + process params → full feature matrix
@@ -33,8 +32,7 @@ from xgboost import XGBClassifier, XGBRegressor
 
 from config import (
     RANDOM_STATE,
-    BO_BORE_GAMMA,
-    BO_LCB_KAPPA,
+    BO_LFBO_GAMMA,
     BO_EI_XI,
     BO_N_ITERATIONS,
     BO_BATCH_SIZE,
@@ -49,9 +47,7 @@ from config import (
     BO_LOG_SCALE_PARAMS,
     TOTAL_VOLUME_ML,
     XGB_FIXED,
-    BO_BORE_ADAPTIVE_GAMMA,
-    BO_SSL_ALPHA,
-    BO_SSL_N_PSEUDO,
+    BO_LFBO_ADAPTIVE_GAMMA,
     BO_CLUSTER_DIV_LAMBDA,
 )
 from cosmo_features import (
@@ -60,6 +56,49 @@ from cosmo_features import (
     compute_sigma_moments,
     CosmoMixer,
 )
+
+
+# ─────────────────────────────────────────────────────────────
+# Phosphine-based stoichiometric ratio
+# ─────────────────────────────────────────────────────────────
+def count_phosphines(smiles):
+    """Count phosphorus atoms in a SMILES string.
+
+    Uses sanitize=False as fallback so organometallic SMILES
+    (Rh, Ir, Pd complexes) that fail RDKit valence checks can
+    still be atom-counted.
+    """
+    from rdkit import Chem
+    if not smiles or (isinstance(smiles, float) and np.isnan(smiles)):
+        return 0
+    smi = str(smiles).strip()
+    if not smi:
+        return 0
+    mol = Chem.MolFromSmiles(smi)
+    if mol is None:
+        mol = Chem.MolFromSmiles(smi, sanitize=False)
+    if mol is None:
+        return 0
+    return sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() == 15)
+
+
+def compute_stoichiometric_ratio(precursor_smi, linker_smi):
+    """Compute metal/linker molar ratio from phosphine counts.
+
+    ratio = P_count(linker) / P_count(precursor)
+
+    If the linker has 4 phosphines and the precursor has 2, the ratio
+    is 2 — meaning 2 mol metal per 1 mol linker are needed to satisfy
+    all phosphine binding sites.
+
+    Returns the ratio (float), or None if either molecule has 0
+    phosphines (e.g. metal salts without phosphine ligands).
+    """
+    p_precursor = count_phosphines(precursor_smi)
+    p_linker = count_phosphines(linker_smi)
+    if p_precursor > 0 and p_linker > 0:
+        return p_linker / p_precursor
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -374,19 +413,126 @@ class RegressionSurrogate:
 
     For RF: inter-tree variance (SMAC approach).
     For XGB: uses XGBoostBootstrapEnsemble externally.
+
+    Sigma calibration
+    -----------------
+    Raw inter-tree / bootstrap variance systematically underestimates true
+    predictive uncertainty (captures epistemic but not aleatoric variance).
+    On first fit, K-fold CV estimates a multiplicative scaling factor so that
+    z = (y - mu) / (sigma * scale) ~ N(0, 1), which EI assumes.
     """
 
     def __init__(self, pipeline, model_type="rf"):
         self.pipeline = pipeline
         self.model_type = model_type
         self.bootstrap_ensemble = None  # set externally for XGB
+        self.sigma_scale_ = None        # computed on first fit
 
     def fit(self, X, y):
         self.pipeline.fit(X, y)
         if self.bootstrap_ensemble is not None:
             Xt = self._transform_features(X)
             self.bootstrap_ensemble.fit(Xt, y)
+
+        # One-time sigma calibration via K-fold CV
+        if self.sigma_scale_ is None:
+            self._calibrate_sigma(X, y)
+
         return self
+
+    # ── sigma calibration ────────────────────────────────────────────────────
+
+    def _calibrate_sigma(self, X, y, n_splits=5):
+        """Compute sigma scaling factor via K-fold cross-validation.
+
+        RF inter-tree std and XGB bootstrap std underestimate the true
+        predictive uncertainty.  This estimates a multiplicative factor so
+        that calibrated z-scores z = (y - mu) / (sigma * scale) have unit
+        variance, which is what EI's Gaussian assumption requires.
+
+        Called once on the first fit(); the factor is reused for subsequent
+        fits because it reflects the model architecture's inherent bias, not
+        the specific training-set size.
+        """
+        from sklearn.model_selection import KFold
+
+        X = np.asarray(X)
+        y = np.asarray(y, dtype=float)
+        n = len(y)
+
+        if n < 2 * n_splits:
+            self.sigma_scale_ = 1.0
+            return
+
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+        z_all = []
+
+        for train_idx, val_idx in kf.split(X):
+            try:
+                fold_pipe = clone(self.pipeline)
+                fold_pipe.fit(X[train_idx], y[train_idx])
+
+                # Transform validation data through preprocessing steps
+                Xv = np.asarray(X[val_idx])
+                reg = None
+                for name, step in fold_pipe.steps:
+                    if isinstance(step, (RandomForestRegressor, XGBRegressor)):
+                        reg = step
+                        break
+                    Xv = step.transform(Xv)
+
+                if reg is None:
+                    continue
+
+                # Compute raw mu and sigma on validation fold
+                if self.model_type == "rf" and hasattr(reg, "estimators_"):
+                    preds = np.array(
+                        [t.predict(Xv) for t in reg.estimators_]
+                    )
+                    mu = preds.mean(axis=0)
+                    sigma = preds.std(axis=0)
+                elif (self.model_type == "xgb"
+                      and self.bootstrap_ensemble is not None):
+                    # Fit a small bootstrap ensemble on the fold
+                    Xt_train = np.asarray(X[train_idx])
+                    for name2, step2 in fold_pipe.steps:
+                        if isinstance(
+                            step2, (RandomForestRegressor, XGBRegressor)
+                        ):
+                            break
+                        Xt_train = step2.transform(Xt_train)
+                    fold_boot = XGBoostBootstrapEnsemble(
+                        self.bootstrap_ensemble.base_params,
+                        M=min(self.bootstrap_ensemble.M, 10),
+                        random_state=self.bootstrap_ensemble.random_state,
+                    )
+                    fold_boot.fit(Xt_train, y[train_idx])
+                    mu, sigma = fold_boot.predict(Xv)
+                else:
+                    continue
+
+                valid = sigma > 1e-10
+                if valid.sum() < 2:
+                    continue
+                z = (y[val_idx][valid] - mu[valid]) / sigma[valid]
+                z_all.extend(z.tolist())
+            except Exception:
+                continue
+
+        if len(z_all) < 10:
+            self.sigma_scale_ = 1.0
+            return
+
+        z_arr = np.array(z_all)
+        scale = float(np.std(z_arr))
+        self.sigma_scale_ = max(scale, 0.1)
+        print(
+            f"[Surrogate] sigma calibrated: scale={self.sigma_scale_:.3f} "
+            f"(raw z-std={scale:.3f}, mean_z={float(np.mean(z_arr)):+.3f}, "
+            f"n={len(z_all)})"
+        )
+
+    # ── core methods ─────────────────────────────────────────────────────────
 
     def _get_regressor(self):
         """Extract the final regressor from the pipeline."""
@@ -405,7 +551,7 @@ class RegressionSurrogate:
         return Xt
 
     def predict(self, X):
-        """Return (mu, sigma) arrays."""
+        """Return (mu, sigma) with calibrated sigma."""
         Xt = self._transform_features(X)
         reg = self._get_regressor()
 
@@ -421,6 +567,10 @@ class RegressionSurrogate:
         else:
             mu = reg.predict(Xt)
             sigma = np.zeros_like(mu)
+
+        # Apply calibration scaling
+        scale = self.sigma_scale_ if self.sigma_scale_ is not None else 1.0
+        sigma = sigma * scale
 
         return mu, sigma
 
@@ -443,7 +593,7 @@ class RankingRegressionSurrogate(RegressionSurrogate):
     directly reflects "find something better than current best."
 
     The raw_to_rank() method converts f_best from raw score space to rank
-    space for use with EI/LCB acquisition functions.
+    space for use with the EI acquisition function.
 
     Reference: "Ranking over Regression for BO and Molecule Selection,"
                APL Machine Learning 3(3), 2024.
@@ -460,6 +610,113 @@ class RankingRegressionSurrogate(RegressionSurrogate):
         # Rank-normalize to [0, 1]: lowest rank → 0, highest rank → 1.
         y_ranked = (rankdata(y, method="average") - 1.0) / max(n - 1, 1)
         return super().fit(X, y_ranked)
+
+    def _calibrate_sigma(self, X, y_ranked, n_splits=5):
+        """Override: calibrate with per-fold rank normalization.
+
+        The parent receives globally-ranked y, but each CV fold must
+        independently rank-normalize its training portion so the fold's
+        model sees the same [0, 1] target distribution it would in
+        production.  Validation targets are mapped to rank space via the
+        fold's training CDF.
+        """
+        from sklearn.model_selection import KFold
+        from scipy.stats import rankdata
+
+        y_raw = (self._y_train_raw
+                 if self._y_train_raw is not None
+                 else np.asarray(y_ranked, dtype=float))
+
+        X = np.asarray(X)
+        n = len(y_raw)
+        if n < 2 * n_splits:
+            self.sigma_scale_ = 1.0
+            return
+
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=RANDOM_STATE)
+        z_all = []
+
+        for train_idx, val_idx in kf.split(X):
+            try:
+                # Per-fold rank normalization
+                y_fold_raw = y_raw[train_idx]
+                n_fold = len(y_fold_raw)
+                y_fold_ranked = (
+                    (rankdata(y_fold_raw, method="average") - 1.0)
+                    / max(n_fold - 1, 1)
+                )
+
+                # Map validation targets into the fold's rank space
+                y_val_ranked = np.array([
+                    float(np.clip(
+                        ((y_fold_raw <= v).sum() - 1) / max(n_fold - 1, 1),
+                        0.0, 1.0,
+                    ))
+                    for v in y_raw[val_idx]
+                ])
+
+                fold_pipe = clone(self.pipeline)
+                fold_pipe.fit(X[train_idx], y_fold_ranked)
+
+                Xv = np.asarray(X[val_idx])
+                reg = None
+                for name, step in fold_pipe.steps:
+                    if isinstance(
+                        step, (RandomForestRegressor, XGBRegressor)
+                    ):
+                        reg = step
+                        break
+                    Xv = step.transform(Xv)
+
+                if reg is None:
+                    continue
+
+                if self.model_type == "rf" and hasattr(reg, "estimators_"):
+                    preds = np.array(
+                        [t.predict(Xv) for t in reg.estimators_]
+                    )
+                    mu = preds.mean(axis=0)
+                    sigma = preds.std(axis=0)
+                elif (self.model_type == "xgb"
+                      and self.bootstrap_ensemble is not None):
+                    Xt_train = np.asarray(X[train_idx])
+                    for name2, step2 in fold_pipe.steps:
+                        if isinstance(
+                            step2, (RandomForestRegressor, XGBRegressor)
+                        ):
+                            break
+                        Xt_train = step2.transform(Xt_train)
+                    fold_boot = XGBoostBootstrapEnsemble(
+                        self.bootstrap_ensemble.base_params,
+                        M=min(self.bootstrap_ensemble.M, 10),
+                        random_state=self.bootstrap_ensemble.random_state,
+                    )
+                    fold_boot.fit(Xt_train, y_fold_ranked)
+                    mu, sigma = fold_boot.predict(Xv)
+                else:
+                    continue
+
+                valid = sigma > 1e-10
+                if valid.sum() < 2:
+                    continue
+                z = (y_val_ranked[valid] - mu[valid]) / sigma[valid]
+                z_all.extend(z.tolist())
+            except Exception:
+                continue
+
+        if len(z_all) < 10:
+            self.sigma_scale_ = 1.0
+            return
+
+        z_arr = np.array(z_all)
+        scale = float(np.std(z_arr))
+        self.sigma_scale_ = max(scale, 0.1)
+        print(
+            f"[Surrogate] sigma calibrated (ranking): "
+            f"scale={self.sigma_scale_:.3f} "
+            f"(raw z-std={scale:.3f}, mean_z={float(np.mean(z_arr)):+.3f}, "
+            f"n={len(z_all)})"
+        )
 
     def raw_to_rank(self, raw_score):
         """Convert a raw pxrd_score to its rank-normalised equivalent.
@@ -517,39 +774,34 @@ class XGBoostBootstrapEnsemble:
 # OrdinalBOObjective
 # ─────────────────────────────────────────────────────────────
 class OrdinalBOObjective:
-    """Raw 0-9 pxrd_score as BO objective + BORE label generation."""
+    """Raw 0-9 pxrd_score as BO objective + LFBO label generation."""
 
-    def __init__(self, gamma=BO_BORE_GAMMA):
+    def __init__(self, gamma=BO_LFBO_GAMMA):
         self.gamma = gamma
 
-    def get_bore_labels(self, y_observed, mode="bore"):
-        """Generate binary labels and sample weights for BORE / LFBO.
+    def get_lfbo_labels(self, y_observed):
+        """Generate binary labels and LFBO improvement weights.
 
-        mode="bore"             : binary z_i = I[y >= tau], uniform weights.
-                                  Recovers Probability of Improvement (PI).
-        mode="lfbo"/"lfbo_ssl"  : binary z_i = I[y >= tau], LFBO weights
-                                  = max(y_i - tau, eps) for positive class.
-                                  Recovers Expected Improvement (EI) via the
-                                  density-ratio framework (Song et al., ICML 2022).
+        Labels: z_i = I[y >= tau], where tau is the (1-gamma) quantile.
+        Weights: max(y_i - tau, eps) for positive class, 1.0 for negative.
+        Recovers Expected Improvement (EI) via the density-ratio framework
+        (Song et al., ICML 2022).
 
         Returns (labels, tau, sample_weight).
         """
         tau = np.quantile(y_observed, 1.0 - self.gamma)
         labels = (y_observed >= tau).astype(int)
 
-        if mode in ("lfbo", "lfbo_ssl"):
-            # LFBO-EI: weight each positive by actual improvement above tau.
-            # Negative examples get uniform weight = 1.0.
-            pos_weights = np.maximum(y_observed - tau, 1e-6)
-            sample_weight = np.where(labels == 1, pos_weights, 1.0)
-            # Normalise positive weights so scale doesn't dominate negatives.
-            if labels.sum() > 0:
-                pos_mean = sample_weight[labels == 1].mean()
-                sample_weight = np.where(
-                    labels == 1, sample_weight / pos_mean, 1.0
-                )
-        else:
-            sample_weight = np.ones(len(labels))
+        # LFBO-EI: weight each positive by actual improvement above tau.
+        # Negative examples get uniform weight = 1.0.
+        pos_weights = np.maximum(y_observed - tau, 1e-6)
+        sample_weight = np.where(labels == 1, pos_weights, 1.0)
+        # Normalise positive weights so scale doesn't dominate negatives.
+        if labels.sum() > 0:
+            pos_mean = sample_weight[labels == 1].mean()
+            sample_weight = np.where(
+                labels == 1, sample_weight / pos_mean, 1.0
+            )
 
         return labels, tau, sample_weight
 
@@ -581,36 +833,12 @@ class EIAcquisition:
         return ei
 
 
-class LCBAcquisition:
-    """Lower Confidence Bound (for maximization: UCB = mu + kappa * sigma)."""
+class LFBOAcquisition:
+    """LFBO-EI acquisition function (Song et al., ICML 2022).
 
-    def __init__(self, kappa=BO_LCB_KAPPA):
-        self.kappa = kappa
-
-    def score(self, mu, sigma):
-        return mu + self.kappa * sigma
-
-
-class BOREAcquisition:
-    """BORE / LFBO / LFBO-SSL acquisition functions.
-
-    mode="bore"
-        Original BORE (Tiao et al., ICML 2021).  Trains an RF classifier on
-        z_i = I[y_i >= tau].  Song et al. (ICML 2022) prove this recovers PI,
-        not EI — it ignores *how much* better a candidate is above tau.
-
-    mode="lfbo"
-        LFBO-EI (Song et al., "A General Recipe for Likelihood-Free BO",
-        ICML 2022).  Replaces uniform positive weights with improvement weights
-        max(y_i - tau, eps), recovering EI from the density-ratio framework.
-        No extra computation vs. BORE.
-
-    mode="lfbo_ssl"
-        LFBO-EI + semi-supervised pseudo-labeling of unlabeled pool candidates
-        (DRE-BO-SSL, arXiv 2023).  After the initial classifier fit, the most
-        confident positive and negative candidates from the pool are pseudo-
-        labeled and added (down-weighted by ssl_alpha) to prevent the classifier
-        from over-exploiting a narrow region as observations accumulate.
+    Trains an RF classifier on binary labels z_i = I[y_i >= tau] with
+    improvement weights max(y_i - tau, eps) for the positive class,
+    recovering Expected Improvement from the density-ratio framework.
 
     adaptive_gamma
         When True, gamma anneals from gamma_init toward 0.10 as observations
@@ -620,19 +848,13 @@ class BOREAcquisition:
 
     def __init__(
         self,
-        gamma=BO_BORE_GAMMA,
+        gamma=BO_LFBO_GAMMA,
         random_state=RANDOM_STATE,
-        mode="bore",
-        adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
-        ssl_alpha=BO_SSL_ALPHA,
-        ssl_n_pseudo=BO_SSL_N_PSEUDO,
+        adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
     ):
         self.gamma_init     = gamma
         self.random_state   = random_state
-        self.mode           = mode
         self.adaptive_gamma = adaptive_gamma
-        self.ssl_alpha      = ssl_alpha
-        self.ssl_n_pseudo   = ssl_n_pseudo
         self.objective      = OrdinalBOObjective(gamma=gamma)
         self.clf = RandomForestClassifier(
             n_estimators=100,
@@ -661,9 +883,7 @@ class BOREAcquisition:
         """
         gamma_t   = self._gamma_t(len(y_observed))
         objective = OrdinalBOObjective(gamma=gamma_t)
-        labels, tau, sample_weight = objective.get_bore_labels(
-            y_observed, mode=self.mode
-        )
+        labels, tau, sample_weight = objective.get_lfbo_labels(y_observed)
 
         if objective.is_degenerate(labels):
             if surrogate is not None:
@@ -673,86 +893,12 @@ class BOREAcquisition:
                 size=len(X_candidates)
             )
 
-        # Fit BORE / LFBO classifier
-        if self.mode in ("lfbo", "lfbo_ssl"):
-            self.clf.fit(X_observed, labels, sample_weight=sample_weight)
-        else:
-            self.clf.fit(X_observed, labels)
+        self.clf.fit(X_observed, labels, sample_weight=sample_weight)
 
         pos_idx = list(self.clf.classes_).index(1)
 
-        if self.mode == "lfbo_ssl":
-            return self._score_ssl(
-                X_observed, labels, sample_weight, X_candidates, pos_idx
-            )
-
         proba = self.clf.predict_proba(X_candidates)
         return proba[:, pos_idx]
-
-    def _score_ssl(self, X_observed, labels, sample_weight, X_candidates, pos_idx):
-        """DRE-BO-SSL: augment training set with pseudo-labeled pool candidates.
-
-        Steps:
-          1. Get initial P(positive|x) from the LFBO-fitted classifier.
-          2. Select the n_pseudo/2 most confident positives and negatives.
-          3. Exclude pseudo-labeled points from the scoring set to prevent
-             self-reinforcing bias (the classifier would trivially score high
-             on points it was just trained to classify as positive).
-          4. Re-fit the classifier on real observations + down-weighted pseudo-labels.
-          5. Score only the non-pseudo candidates from the augmented classifier,
-             then restore the full-length score array with the initial proba
-             for the pseudo-labeled points.
-
-        This prevents the classifier from collapsing to a spike around the
-        current best region as more observations accumulate.
-        """
-        # Step 1 — initial probabilities
-        proba       = self.clf.predict_proba(X_candidates)
-        p_positive  = proba[:, pos_idx]
-
-        # Step 2 — select confident pseudo-labels
-        n_cand   = len(X_candidates)
-        n_pseudo = min(self.ssl_n_pseudo, max(4, n_cand // 20))
-        n_pos    = n_pseudo // 2
-        n_neg    = n_pseudo - n_pos
-
-        ranked         = np.argsort(p_positive)
-        pseudo_neg_idx = ranked[:n_neg]
-        pseudo_pos_idx = ranked[-n_pos:]
-        all_pseudo_idx = np.concatenate([pseudo_neg_idx, pseudo_pos_idx])
-        pseudo_set     = set(all_pseudo_idx.tolist())
-
-        X_pseudo = X_candidates[all_pseudo_idx]
-        y_pseudo = np.concatenate([np.zeros(n_neg), np.ones(n_pos)])
-        w_pseudo = np.full(len(y_pseudo), self.ssl_alpha)
-
-        # Step 3 — augment and refit
-        X_aug = np.vstack([X_observed, X_pseudo])
-        y_aug = np.concatenate([labels, y_pseudo])
-        w_aug = np.concatenate([sample_weight, w_pseudo])
-        self.clf.fit(X_aug, y_aug, sample_weight=w_aug)
-
-        # Step 4 — score non-pseudo candidates with augmented classifier,
-        # keep initial proba for pseudo-labeled points to avoid bias
-        new_pos_idx = list(self.clf.classes_).index(1)
-        scores = p_positive.copy()  # start with initial proba
-        non_pseudo_mask = np.array([i not in pseudo_set for i in range(n_cand)])
-        if non_pseudo_mask.any():
-            proba_final = self.clf.predict_proba(X_candidates[non_pseudo_mask])
-            scores[non_pseudo_mask] = proba_final[:, new_pos_idx]
-        return scores
-
-
-class PIordinalAcquisition:
-    """P(Crystalline | x) from Frank-Hall classifier — static baseline."""
-
-    def __init__(self, classifier_pipeline):
-        self.pipeline = classifier_pipeline
-
-    def score(self, X_candidates):
-        """Return P(y == 2) = P(Crystalline) for each candidate."""
-        proba = self.pipeline.predict_proba(X_candidates)
-        return proba[:, -1]  # last class = Crystalline
 
 
 class ThompsonSamplingAcquisition:
@@ -762,12 +908,30 @@ class ThompsonSamplingAcquisition:
         self.rng = np.random.RandomState(random_state)
 
     def score(self, surrogate, X_candidates):
-        """Sample a single tree prediction as the acquisition value."""
+        """Sample a single tree prediction as the acquisition value.
+
+        When the sampled tree produces a constant prediction for all candidates
+        (e.g. fixed-chemistry search where all candidates share the same
+        molecular features and fall into one RF leaf), the acquisition is
+        uninformative.  In that case, retry up to min(n_trees, 20) times to
+        find an informative tree.  If no informative tree is found, fall back
+        to the ensemble mean plus independent Gaussian noise scaled by the
+        ensemble standard deviation, which is a well-known approximate-TS
+        strategy.
+        """
         Xt = surrogate._transform_features(X_candidates)
         reg = surrogate._get_regressor()
         if hasattr(reg, "estimators_"):
-            tree_idx = self.rng.randint(len(reg.estimators_))
-            return reg.estimators_[tree_idx].predict(Xt)
+            n_trees = len(reg.estimators_)
+            max_tries = min(n_trees, 20)
+            for _ in range(max_tries):
+                tree_idx = self.rng.randint(n_trees)
+                preds = reg.estimators_[tree_idx].predict(Xt)
+                if np.std(preds) > 1e-8:
+                    return preds
+            # All sampled trees degenerate → approximate TS fallback
+            mu, sigma = surrogate.predict(X_candidates)
+            return mu + self.rng.randn(len(mu)) * np.maximum(sigma, 1e-6)
         else:
             return reg.predict(Xt)
 
@@ -776,7 +940,129 @@ class ThompsonSamplingAcquisition:
 # BatchSelector
 # ─────────────────────────────────────────────────────────────
 class BatchSelector:
-    """Batch selection via Constant Liar or Kriging Believer."""
+    """Batch selection via Constant Liar, Kriging Believer, or Diverse Greedy."""
+
+    # Process-parameter columns used for diversity distance.
+    _PROC_COLS = ["temperature_k", "total_conc", "phi_1", "equivalents",
+                  "metal_over_linker_ratio"]
+
+    @staticmethod
+    def diverse_greedy(
+        surrogate, X_train, y_train, X_candidates,
+        candidates_df, acquisition_name, batch_size,
+        diversity_lambda=0.3,
+        **acq_kwargs,
+    ):
+        """Greedy quality-diversity batch selection.
+
+        Addresses the core failure of kriging_believer + LFBO: with n~750+,
+        adding one hallucinated point barely moves the LFBO classifier, so all
+        batch members receive identical acquisition values.
+
+        Instead, score ALL candidates once with the acquisition function, then
+        select the batch greedily by maximising:
+
+            combined(x) = (1 - lambda) * af_norm(x)
+                        + lambda       * min_dist(x, already_selected)
+
+        where min_dist is computed over normalised process-parameter space plus
+        a solvent-identity bonus, so the strategy naturally diversifies across
+        both conditions and solvents.
+
+        Distance metric (bounded to [0, 1]):
+            proc_d  = ||x_proc_i - x_proc_j||_2 / sqrt(n_proc_dims)   (normalised)
+            sol_d   = 1 if solvent_1 differs, else 0
+            dist    = 0.5 * proc_d + 0.5 * sol_d
+
+        Parameters
+        ----------
+        diversity_lambda : float in [0, 1]
+            Weight on diversity vs. acquisition quality.
+            0 = pure acquisition (same as argmax), 1 = pure diversity.
+            Default 0.3 gives quality-first with meaningful spread.
+
+        Returns
+        -------
+        selected_indices : list[int]  length batch_size
+        combined_scores  : np.ndarray  length len(candidates_df), combined score
+                           for selected members; nan for non-selected candidates.
+        """
+        n_cand = X_candidates.shape[0]
+
+        # --- Step 1: score all candidates once ---
+        acq_vals = _compute_acquisition(
+            acquisition_name, surrogate, X_train, y_train,
+            X_candidates, **acq_kwargs
+        )
+
+        af_min, af_max = acq_vals.min(), acq_vals.max()
+        af_norm = (acq_vals - af_min) / (af_max - af_min + 1e-9)
+
+        # --- Step 2: build normalised process-param matrix ---
+        # When candidates_df is None (simulation mode), use the full feature
+        # matrix for distance computation.
+        proc_cols = ([c for c in BatchSelector._PROC_COLS
+                      if c in candidates_df.columns]
+                     if candidates_df is not None else [])
+        if proc_cols:
+            proc = candidates_df[proc_cols].values.astype(float)
+            p_min = proc.min(axis=0)
+            p_rng = proc.max(axis=0) - p_min
+            p_rng[p_rng < 1e-9] = 1.0
+            proc_norm = (proc - p_min) / p_rng          # each col in [0,1]
+            n_proc = len(proc_cols)
+        else:
+            # Simulation mode or no process columns: use full feature space
+            proc_norm = X_candidates.copy()
+            p_min = proc_norm.min(axis=0)
+            p_rng = proc_norm.max(axis=0) - p_min
+            p_rng[p_rng < 1e-9] = 1.0
+            proc_norm = (proc_norm - p_min) / p_rng
+            n_proc = proc_norm.shape[1]
+
+        solvents = (candidates_df["solvent_1"].values
+                    if candidates_df is not None
+                    and "solvent_1" in candidates_df.columns else None)
+
+        def _dist(i, j):
+            proc_d = np.linalg.norm(proc_norm[i] - proc_norm[j]) / np.sqrt(n_proc)
+            sol_d  = 1.0 if (solvents is not None and solvents[i] != solvents[j]) else 0.0
+            return 0.5 * proc_d + 0.5 * sol_d
+
+        def _min_dist_to_selected(i, selected):
+            return min(_dist(i, s) for s in selected)
+
+        # --- Step 3: greedy selection ---
+        selected = []
+        masked   = np.zeros(n_cand, dtype=bool)
+
+        for step in range(batch_size):
+            if step == 0:
+                scores = af_norm.copy()
+            else:
+                div_scores = np.array([
+                    _min_dist_to_selected(i, selected) if not masked[i] else -np.inf
+                    for i in range(n_cand)
+                ])
+                scores = (1.0 - diversity_lambda) * af_norm + diversity_lambda * div_scores
+
+            scores[masked] = -np.inf
+            best = int(np.argmax(scores))
+            selected.append(best)
+            masked[best] = True
+
+        # Build per-candidate combined scores (nan for non-batch rows)
+        combined = np.full(n_cand, np.nan)
+        for step, idx in enumerate(selected):
+            if step == 0:
+                combined[idx] = af_norm[idx]
+            else:
+                combined[idx] = (
+                    (1.0 - diversity_lambda) * af_norm[idx]
+                    + diversity_lambda * _min_dist_to_selected(idx, selected[:step])
+                )
+
+        return selected, combined
 
     @staticmethod
     def constant_liar(
@@ -789,10 +1075,12 @@ class BatchSelector:
         X_aug = np.array(X_train, copy=True) if isinstance(X_train, np.ndarray) else X_train.copy()
         y_aug = np.array(y_train, copy=True)
 
-        for _ in range(batch_size):
+        for i in range(batch_size):
+            _kwargs = dict(acq_kwargs)
+            _kwargs["random_state"] = acq_kwargs.get("random_state", RANDOM_STATE) + i
             acq_vals = _compute_acquisition(
                 acquisition_name, surrogate, X_aug, y_aug,
-                X_candidates, **acq_kwargs
+                X_candidates, **_kwargs
             )
             # Mask already selected
             for idx in selected_indices:
@@ -824,10 +1112,12 @@ class BatchSelector:
         X_aug = np.array(X_train, copy=True) if isinstance(X_train, np.ndarray) else X_train.copy()
         y_aug = np.array(y_train, copy=True)
 
-        for _ in range(batch_size):
+        for i in range(batch_size):
+            _kwargs = dict(acq_kwargs)
+            _kwargs["random_state"] = acq_kwargs.get("random_state", RANDOM_STATE) + i
             acq_vals = _compute_acquisition(
                 acquisition_name, surrogate, X_aug, y_aug,
-                X_candidates, **acq_kwargs
+                X_candidates, **_kwargs
             )
             for idx in selected_indices:
                 acq_vals[idx] = -np.inf
@@ -861,11 +1151,7 @@ def _compute_acquisition(
 ):
     """Dispatch acquisition function by name.
 
-    Supported names: "bore", "lfbo", "lfbo_ssl", "ei", "lcb",
-                     "thompson", "pi_ordinal", "random".
-
-    "lfbo" and "lfbo_ssl" are first-class aliases for BOREAcquisition with
-    mode="lfbo" and mode="lfbo_ssl" respectively — they require no surrogate.
+    Supported names: "lfbo", "ei", "thompson", "random", "consensus".
     """
     if name == "ei":
         mu, sigma = surrogate.predict(X_candidates)
@@ -875,34 +1161,26 @@ def _compute_acquisition(
             f_best = surrogate.raw_to_rank(f_best)
         return EIAcquisition(xi=kwargs.get("xi", BO_EI_XI)).score(mu, sigma, f_best)
 
-    elif name == "lcb":
-        mu, sigma = surrogate.predict(X_candidates)
-        return LCBAcquisition(kappa=kwargs.get("kappa", BO_LCB_KAPPA)).score(mu, sigma)
-
-    elif name in ("bore", "lfbo", "lfbo_ssl"):
-        # "lfbo" / "lfbo_ssl" are first-class names that map directly to modes.
-        mode = name
-        bore = BOREAcquisition(
-            gamma=kwargs.get("gamma", BO_BORE_GAMMA),
+    elif name == "lfbo":
+        lfbo = LFBOAcquisition(
+            gamma=kwargs.get("gamma", BO_LFBO_GAMMA),
             random_state=kwargs.get("random_state", RANDOM_STATE),
-            mode=mode,
             adaptive_gamma=kwargs.get(
-                "bore_adaptive_gamma", BO_BORE_ADAPTIVE_GAMMA
+                "lfbo_adaptive_gamma", BO_LFBO_ADAPTIVE_GAMMA
             ),
         )
-        return bore.score(X_train, y_train, X_candidates, surrogate=surrogate)
+        return lfbo.score(X_train, y_train, X_candidates, surrogate=surrogate)
+
+    elif name == "consensus":
+        return _consensus_acquisition(
+            surrogate, X_train, y_train, X_candidates, **kwargs
+        )
 
     elif name == "thompson":
         ts = ThompsonSamplingAcquisition(
             random_state=kwargs.get("random_state", RANDOM_STATE)
         )
         return ts.score(surrogate, X_candidates)
-
-    elif name == "pi_ordinal":
-        pi = kwargs.get("pi_ordinal_pipeline")
-        if pi is not None:
-            return PIordinalAcquisition(pi).score(X_candidates)
-        return np.random.RandomState(RANDOM_STATE).uniform(size=len(X_candidates))
 
     elif name == "random":
         return np.random.RandomState(
@@ -911,6 +1189,53 @@ def _compute_acquisition(
 
     else:
         raise ValueError(f"Unknown acquisition: {name}")
+
+
+def _consensus_acquisition(
+    surrogate, X_train, y_train, X_candidates, *,
+    top_k_frac=0.10, **kwargs
+):
+    """Consensus acquisition: intersect top-K picks from EI and LFBO.
+
+    1. Score all candidates with both EI and LFBO.
+    2. Percentile-rank each into [0, 1].
+    3. Candidates in the top ``top_k_frac`` of *both* methods get a boosted
+       combined score (mean of the two ranks + 1.0 bonus).
+    4. All other candidates are scored by their LFBO rank alone, so when the
+       intersection is empty the result is equivalent to pure LFBO.
+
+    Returns an acquisition-value array (higher is better) of length
+    ``len(X_candidates)``.
+    """
+    n = len(X_candidates)
+    top_k = max(1, int(n * top_k_frac))
+
+    # --- score with both methods ---
+    ei_vals = _compute_acquisition(
+        "ei", surrogate, X_train, y_train, X_candidates, **kwargs
+    )
+    lfbo_vals = _compute_acquisition(
+        "lfbo", surrogate, X_train, y_train, X_candidates, **kwargs
+    )
+
+    # --- percentile-rank into [0, 1] ---
+    from scipy.stats import rankdata
+    ei_rank = rankdata(ei_vals, method="average") / n
+    lfbo_rank = rankdata(lfbo_vals, method="average") / n
+
+    # --- identify top-K sets ---
+    ei_topk = set(np.argsort(ei_vals)[-top_k:])
+    lfbo_topk = set(np.argsort(lfbo_vals)[-top_k:])
+    overlap = ei_topk & lfbo_topk
+
+    # --- build combined score ---
+    # Base: LFBO rank (so fallback = pure LFBO ordering)
+    combined = lfbo_rank.copy()
+    # Consensus candidates: mean of both ranks + bonus so they always rank above
+    for idx in overlap:
+        combined[idx] = (ei_rank[idx] + lfbo_rank[idx]) / 2.0 + 1.0
+
+    return combined
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1032,13 +1357,16 @@ class CandidateFeaturizer:
                 "equivalents", pd.Series(np.ones(n))
             ).values.astype(float)
 
-            metal_conc = total_conc * ratio / (1.0 + ratio)
-            linker_conc = total_conc / (1.0 + ratio)
-            umol_metal = metal_conc * self.total_volume_ml
+            # total_conc = (linker + metal + modulator) / volume
+            # metal      = ratio * linker
+            # modulator  = equiv * linker
+            denom       = 1.0 + ratio + equiv
+            linker_conc = total_conc / denom
+            metal_conc  = ratio * linker_conc
             umol_linker = linker_conc * self.total_volume_ml
-            # mod: equivalents = umol_mod / umol_metal (stoichiometric, unitless)
-            umol_mod  = equiv * umol_metal
-            mod_conc  = umol_mod / self.total_volume_ml
+            umol_metal  = metal_conc  * self.total_volume_ml
+            umol_mod    = equiv * umol_linker
+            mod_conc    = umol_mod / self.total_volume_ml
 
             for col, vals in [
                 ("total_conc",           total_conc),
@@ -1739,31 +2067,102 @@ class BOCheckpointer:
 # ─────────────────────────────────────────────────────────────
 # BOLoop
 # ─────────────────────────────────────────────────────────────
+# Acquisition → batch strategy compatibility
+# ─────────────────────────────────────────────────────────────
+#
+# Constant Liar (CL) and Kriging Believer (KB) work by hallucinating an
+# observation at each selected point and refitting the regression surrogate.
+# The updated (mu, sigma) naturally deflates acquisition scores near
+# already-selected points.
+#
+#   CL  hallucinates f_best (pessimistic) → more diverse/exploratory batches.
+#   KB  hallucinates mu(x)  (optimistic)  → more exploitative batches
+#       concentrated near the predicted optimum.
+#
+# This mechanism only works for acquisition functions that consume the
+# regression surrogate's (mu, sigma).  Classifier-based (LFBO) and
+# surrogate-independent (random) acquisitions ignore the refitted surrogate,
+# so CL/KB produce near-identical batch members.  Thompson Sampling has a
+# natural parallel mechanism (independent tree draws).
+#
+# Use CL when you want the batch to spread across the search space
+# (early exploration, high uncertainty).
+# Use KB when you trust the surrogate and want to exploit the predicted
+# optimum region more aggressively (later in the campaign).
+#
+# References:
+#   Ginsbourger et al. (2010) — CL/KB for parallel BO
+#   Oliveira, Tiao & Ramos (NeurIPS 2022) — CL/KB failure with BORE
+#   Kandasamy et al. (AISTATS 2018) — parallel Thompson Sampling
+
+# Valid batch strategies per acquisition function.
+VALID_BATCH_STRATEGIES = {
+    "ei":        ["constant_liar", "kriging_believer"],
+    "lfbo":      ["diverse_greedy"],
+    "consensus": ["diverse_greedy"],
+    "thompson":  ["diverse_greedy"],
+    "random":    ["diverse_greedy"],
+}
+
+# Default batch strategy when none is explicitly requested.
+DEFAULT_BATCH_STRATEGY = {
+    "ei":        "kriging_believer",
+    "lfbo":      "diverse_greedy",
+    "consensus": "diverse_greedy",
+    "thompson":  "diverse_greedy",
+    "random":    "diverse_greedy",
+}
+
+
+def resolve_batch_strategy(acquisition_name, requested_strategy=None):
+    """Return a valid batch strategy for the given acquisition function.
+
+    If *requested_strategy* is valid for *acquisition_name*, it is returned
+    unchanged.  Otherwise a warning is printed and the default for that
+    acquisition is used.
+    """
+    valid = VALID_BATCH_STRATEGIES.get(acquisition_name)
+    default = DEFAULT_BATCH_STRATEGY.get(acquisition_name, "diverse_greedy")
+
+    if valid is None:
+        return requested_strategy or default
+
+    if requested_strategy is None or requested_strategy not in valid:
+        if requested_strategy is not None:
+            print(f"[BO] WARNING: batch_strategy='{requested_strategy}' is "
+                  f"incompatible with acquisition='{acquisition_name}'. "
+                  f"Valid options: {valid}. "
+                  f"Auto-selecting '{default}'.")
+        return default
+
+    return requested_strategy
+
+
 class BOLoop:
     """Main BO loop for simulation, recommendation, and batch modes."""
 
     def __init__(
         self,
         surrogate,
-        acquisition_name="bore",
-        batch_strategy="constant_liar",
+        acquisition_name="lfbo",
+        batch_strategy=None,
         batch_size=BO_BATCH_SIZE,
         n_iterations=BO_N_ITERATIONS,
         epsilon_greedy=BO_EPSILON_GREEDY,
-        classifier_pipeline=None,
         random_state=RANDOM_STATE,
-        bore_adaptive_gamma=BO_BORE_ADAPTIVE_GAMMA,
+        lfbo_adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
     ):
         self.surrogate = surrogate
         self.acquisition_name = acquisition_name
-        self.batch_strategy = batch_strategy
+        self.batch_strategy = resolve_batch_strategy(
+            acquisition_name, batch_strategy
+        )
         self.batch_size = batch_size
         self.n_iterations = n_iterations
         self.epsilon_greedy = epsilon_greedy
-        self.classifier_pipeline = classifier_pipeline
         self.rng = np.random.RandomState(random_state)
         self.random_state = random_state
-        self.bore_adaptive_gamma = bore_adaptive_gamma
+        self.lfbo_adaptive_gamma = lfbo_adaptive_gamma
 
     def run_simulation(self, X, y_raw, init_fraction=BO_INIT_FRACTION,
                        groups=None,
@@ -1932,10 +2331,10 @@ class BOLoop:
             else:
                 acq_kwargs = {
                     "f_best": f_best,
-                    "gamma": BO_BORE_GAMMA,
+                    "gamma": BO_LFBO_GAMMA,
                     "random_state": self.random_state + it,
-                    "pi_ordinal_pipeline": self.classifier_pipeline,
-                    "bore_adaptive_gamma": self.bore_adaptive_gamma,
+
+                    "lfbo_adaptive_gamma": self.lfbo_adaptive_gamma,
                 }
                 acq_vals = _compute_acquisition(
                     self.acquisition_name, self.surrogate,
@@ -2098,13 +2497,18 @@ class BOLoop:
 
             acq_kwargs = {
                 "f_best": f_best,
-                "gamma": BO_BORE_GAMMA,
+                "gamma": BO_LFBO_GAMMA,
                 "random_state": self.random_state + batch_it,
-                "pi_ordinal_pipeline": self.classifier_pipeline,
-                "bore_adaptive_gamma": self.bore_adaptive_gamma,
+                "lfbo_adaptive_gamma": self.lfbo_adaptive_gamma,
             }
 
-            if self.batch_strategy == "constant_liar":
+            if self.batch_strategy == "diverse_greedy":
+                local_indices, _ = BatchSelector.diverse_greedy(
+                    self.surrogate, X_train, y_train, X_pool,
+                    None, self.acquisition_name, self.batch_size,
+                    **acq_kwargs,
+                )
+            elif self.batch_strategy == "constant_liar":
                 local_indices = BatchSelector.constant_liar(
                     self.surrogate, X_train, y_train, X_pool,
                     None, self.acquisition_name, self.batch_size,
@@ -2157,9 +2561,8 @@ class BOLoop:
 
         acq_kwargs = {
             "f_best": y_train.max(),
-            "gamma": BO_BORE_GAMMA,
+            "gamma": BO_LFBO_GAMMA,
             "random_state": self.random_state,
-            "pi_ordinal_pipeline": self.classifier_pipeline,
         }
         acq_vals = _compute_acquisition(
             self.acquisition_name, self.surrogate,
@@ -2170,16 +2573,6 @@ class BOLoop:
         results["pxrd_predicted"] = mu
         results["uncertainty"] = sigma
         results["acquisition_value"] = acq_vals
-
-        # Add classifier probabilities if available
-        if self.classifier_pipeline is not None:
-            try:
-                proba = self.classifier_pipeline.predict_proba(candidate_features)
-                results["P_amorphous"] = proba[:, 0]
-                results["P_partial"] = proba[:, 1] if proba.shape[1] > 1 else 0.0
-                results["P_crystalline"] = proba[:, -1]
-            except Exception:
-                pass
 
         results = results.sort_values("acquisition_value", ascending=False)
         return results
