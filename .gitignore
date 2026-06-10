@@ -14,3 +14,13 @@ data/
 .claude/
 checkpoints/
 references/
+logs/
+archive/
+*.ipynb
+.streamlit/secrets.toml
+# Lab recommendation logs (internal experiment records, regenerated per run)
+docs/bo_recommendations_*
+# Internal review notes (not part of the public release)
+docs/PUBLICATION_REVIEW.md
+# App assets are needed at runtime despite the global *.png ignore
+!app/assets/**/*.png

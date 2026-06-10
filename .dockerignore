@@ -1,0 +1,37 @@
+# What NOT to bake into the deployed image. (Fly builds from this local folder,
+# so this file — not .gitignore — decides what ships.)
+
+# Version control, virtualenvs, caches
+.git
+.gitignore
+.venv
+**/__pycache__
+*.pyc
+*.egg-info
+dist
+build
+
+# Local tooling / scratch / notes
+**/.claude
+logs
+references
+*.ipynb
+_*.py
+write_shap_cell.py
+shap_cell_source.py
+
+# Root-level result figures (the app's logo lives in docs/, which is kept)
+*.png
+
+# Model checkpoints are large and regenerable: after the first deploy, open the
+# Retrain Model page and click "Retrain" once to build the model on the volume.
+# (Remove this line if you'd rather bake your locally-trained model into the
+# image so the app works without retraining — at the cost of a much larger image.)
+checkpoints
+
+# Data we do NOT want in the image: course PDFs, known-bad / backup spreadsheets,
+# and the rolling backups dir. The real seed Excel + data/solvent_cosmo/ DO ship.
+data/*.pdf
+data/*_bad.xlsx
+data/*_backup_*.xlsx
+data/backups

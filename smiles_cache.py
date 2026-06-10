@@ -56,7 +56,7 @@ class SMILESCache:
             return
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         joblib.dump(self._store, self.path)
-        print(f"[smiles_cache] Saved {len(self._store):,} entries → {self.path}")
+        print(f"[smiles_cache] Saved {len(self._store):,} entries -> {self.path}")
         self._dirty = False
 
     def __len__(self) -> int:

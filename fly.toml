@@ -1,0 +1,42 @@
+# fly.toml — COMPASS deployment config for Fly.io
+#
+# `app` must be globally unique across Fly. If "mof-compass" is taken, change it
+# (or let `fly launch` pick one). This is just Fly's internal name — your public
+# address is still mof-compass.app, wired up separately with `fly certs`.
+app = "mof-compass"
+primary_region = "sjc"   # San Jose, closest to UCSD. See `fly platform regions`.
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  COMPASS_DATA_DIR = "/data"
+  PORT = "8501"
+
+# The persistent volume that holds the experiment Excel, checkpoints and docs.
+# Create it once with:
+#   fly volumes create compass_data --size 5 --region sjc
+[mounts]
+  source = "compass_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8501
+  force_https = true
+  # Always keep one machine running so chemists never hit a cold start.
+  # To cut cost (the app sleeps when idle, ~1–2 min wake-up on first hit),
+  # set this to 0 and run: fly scale count 1
+  min_machines_running = 1
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+
+  [[http_service.checks]]
+    method = "GET"
+    path = "/_stcore/health"     # Streamlit's built-in health endpoint
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "180s"        # generous: the ML stack takes a while to import
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"                  # bump to 4gb (fly scale memory 4096) if Recommend OOMs

@@ -18,7 +18,7 @@ from models import (scoring_ordinal, make_xgb_pipe, make_rf_pipe,
 # ─────────────────────────────────────────────────────────────
 # objective_xgb
 # ─────────────────────────────────────────────────────────────
-def objective_xgb(trial, X, y, cv, groups):
+def objective_xgb(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":     trial.suggest_int("n_estimators", 100, 600),
         "max_depth":        trial.suggest_int("max_depth", 3, 5),
@@ -30,7 +30,8 @@ def objective_xgb(trial, X, y, cv, groups):
         "reg_alpha":        trial.suggest_float("reg_alpha", 0.1, 20.0, log=True),
         "reg_lambda":       trial.suggest_float("reg_lambda", 0.5, 20.0, log=True),
     }
-    pipe   = make_xgb_pipe(param, with_cl=False)          # same structure as final pipe
+    pipe   = make_xgb_pipe(param, with_cl=False,
+                           n_chem_features=n_chem_features)
     cv_res = cross_validate(
         pipe, X, y, cv=cv, groups=groups,
         scoring=scoring_ordinal, n_jobs=1, return_train_score=False,
@@ -61,7 +62,7 @@ def objective_xgb(trial, X, y, cv, groups):
 # ─────────────────────────────────────────────────────────────
 # objective_rf
 # ─────────────────────────────────────────────────────────────
-def objective_rf(trial, X, y, cv, groups):
+def objective_rf(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
         "max_depth":         trial.suggest_int("max_depth", 5, 15),
@@ -70,7 +71,8 @@ def objective_rf(trial, X, y, cv, groups):
         "max_features":      trial.suggest_categorical("max_features",
                                                         ["sqrt", "log2"]),
     }
-    pipe   = make_rf_pipe(param, with_cl=False)            # ← same structure as final pipe
+    pipe   = make_rf_pipe(param, with_cl=False,
+                          n_chem_features=n_chem_features)
     scores = cross_val_score(
         pipe, X, y, cv=cv, groups=groups,
         scoring=scoring_ordinal["qwk"], n_jobs=1,
@@ -81,7 +83,7 @@ def objective_rf(trial, X, y, cv, groups):
 # ─────────────────────────────────────────────────────────────
 # objective_xgb_cl_mi
 # ─────────────────────────────────────────────────────────────
-def objective_xgb_cl_mi(trial, X, y, cv, groups):
+def objective_xgb_cl_mi(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":     trial.suggest_int("n_estimators", 100, 600),
         "max_depth":        trial.suggest_int("max_depth", 3, 5),
@@ -93,7 +95,8 @@ def objective_xgb_cl_mi(trial, X, y, cv, groups):
         "reg_alpha":        trial.suggest_float("reg_alpha", 0.1, 20.0, log=True),
         "reg_lambda":       trial.suggest_float("reg_lambda", 0.5, 20.0, log=True),
     }
-    pipe   = make_xgb_pipe(param, with_cl=True)
+    pipe   = make_xgb_pipe(param, with_cl=True,
+                           n_chem_features=n_chem_features)
     cv_res = cross_validate(
         pipe, X, y, cv=cv, groups=groups,
         scoring=scoring_ordinal, n_jobs=1, return_train_score=False,
@@ -124,7 +127,7 @@ def objective_xgb_cl_mi(trial, X, y, cv, groups):
 # ─────────────────────────────────────────────────────────────
 # objective_rf_cl_mi
 # ─────────────────────────────────────────────────────────────
-def objective_rf_cl_mi(trial, X, y, cv, groups):
+def objective_rf_cl_mi(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
         "max_depth":         trial.suggest_int("max_depth", 5, 15),
@@ -132,7 +135,8 @@ def objective_rf_cl_mi(trial, X, y, cv, groups):
         "min_samples_leaf":  trial.suggest_int("min_samples_leaf", 3, 15),
         "max_features":      trial.suggest_categorical("max_features", ["sqrt", "log2"]),
     }
-    pipe   = make_rf_pipe(param, with_cl=True)
+    pipe   = make_rf_pipe(param, with_cl=True,
+                          n_chem_features=n_chem_features)
     scores = cross_val_score(
         pipe, X, y, cv=cv, groups=groups,
         scoring=scoring_ordinal["qwk"], n_jobs=1,
@@ -143,7 +147,7 @@ def objective_rf_cl_mi(trial, X, y, cv, groups):
 # ─────────────────────────────────────────────────────────────
 # objective_xgb_cl_only
 # ─────────────────────────────────────────────────────────────
-def objective_xgb_cl_only(trial, X, y, cv, groups):
+def objective_xgb_cl_only(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":     trial.suggest_int("n_estimators", 100, 600),
         "max_depth":        trial.suggest_int("max_depth", 3, 5),
@@ -156,7 +160,7 @@ def objective_xgb_cl_only(trial, X, y, cv, groups):
         "reg_lambda":       trial.suggest_float("reg_lambda", 0.5, 20.0, log=True),
     }
 
-    pipe = make_xgb_pipe_cl_only(param)  # CL-only feature pipeline
+    pipe = make_xgb_pipe_cl_only(param, n_chem_features=n_chem_features)
 
     cv_res = cross_validate(
         pipe,
@@ -194,7 +198,7 @@ def objective_xgb_cl_only(trial, X, y, cv, groups):
 # ─────────────────────────────────────────────────────────────
 # objective_rf_cl_only
 # ─────────────────────────────────────────────────────────────
-def objective_rf_cl_only(trial, X, y, cv, groups):
+def objective_rf_cl_only(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
         "max_depth":         trial.suggest_int("max_depth", 5, 15),
@@ -205,7 +209,7 @@ def objective_rf_cl_only(trial, X, y, cv, groups):
         ),
     }
 
-    pipe = make_rf_pipe_cl_only(param)
+    pipe = make_rf_pipe_cl_only(param, n_chem_features=n_chem_features)
 
     scores = cross_val_score(
         pipe,

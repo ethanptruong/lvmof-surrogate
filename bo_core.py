@@ -43,12 +43,16 @@ from config import (
     BO_BOOTSTRAP_M,
     BO_CONTROLLABLE_PARAMS,
     BO_OPTIONAL_PARAMS,
-    BO_TOTAL_CONC_CLIP_PERCENTILES,
+    BO_LINKER_CONC_CLIP_PERCENTILES,
     BO_LOG_SCALE_PARAMS,
     TOTAL_VOLUME_ML,
     XGB_FIXED,
     BO_LFBO_ADAPTIVE_GAMMA,
     BO_CLUSTER_DIV_LAMBDA,
+    BO_TAIL_WEIGHT_ENABLED,
+    BO_TAIL_WEIGHT_THRESHOLD,
+    BO_TAIL_WEIGHT_ALPHA,
+    BO_TAIL_WEIGHT_MIN_FREQ,
 )
 from cosmo_features import (
     load_cosmo_index,
@@ -283,7 +287,8 @@ class SearchSpace:
     """
 
     def __init__(self, train_df=None, solvent_mixer=None, extra_params=None,
-                 observed_pairs_only=False):
+                 observed_pairs_only=False,
+                 linker_umol_bounds=None, total_volume_ml=None):
         all_params = dict(BO_CONTROLLABLE_PARAMS)
         if extra_params:
             all_params.update(extra_params)
@@ -291,7 +296,7 @@ class SearchSpace:
         self.bounds = {}
         for param, static_bounds in all_params.items():
             if static_bounds is None and train_df is not None:
-                lo_pct, hi_pct = BO_TOTAL_CONC_CLIP_PERCENTILES
+                lo_pct, hi_pct = BO_LINKER_CONC_CLIP_PERCENTILES
                 vals = train_df[param].dropna()
                 self.bounds[param] = (
                     float(np.percentile(vals, lo_pct)),
@@ -301,6 +306,29 @@ class SearchSpace:
                 self.bounds[param] = static_bounds
             else:
                 self.bounds[param] = (1.0, 100.0)  # fallback
+
+        # Intersect linker_conc bounds with the µmol hard constraint BEFORE LHS
+        # sampling so the LHS distribution isn't distorted by a post-hoc clip.
+        if (linker_umol_bounds is not None and total_volume_ml
+                and total_volume_ml > 0 and "linker_conc" in self.bounds):
+            umol_lo, umol_hi = linker_umol_bounds
+            conc_lo_umol = float(umol_lo) / float(total_volume_ml)
+            conc_hi_umol = float(umol_hi) / float(total_volume_ml)
+            pct_lo, pct_hi = self.bounds["linker_conc"]
+            new_lo = max(pct_lo, conc_lo_umol)
+            new_hi = min(pct_hi, conc_hi_umol)
+            if new_hi <= new_lo:
+                print(f"  [SearchSpace] WARNING: linker µmol bounds "
+                      f"[{umol_lo:.1f},{umol_hi:.1f}] at V={total_volume_ml} mL "
+                      f"are incompatible with data percentile bounds "
+                      f"[{pct_lo:.3g},{pct_hi:.3g}] — keeping µmol-derived bounds.")
+                new_lo, new_hi = conc_lo_umol, conc_hi_umol
+            if (new_lo, new_hi) != (pct_lo, pct_hi):
+                print(f"  [SearchSpace] linker_conc bounds tightened from "
+                      f"[{pct_lo:.3g},{pct_hi:.3g}] to [{new_lo:.3g},{new_hi:.3g}] "
+                      f"(µmol constraint [{umol_lo:.1f},{umol_hi:.1f}] / "
+                      f"V={total_volume_ml} mL).")
+            self.bounds["linker_conc"] = (new_lo, new_hi)
 
         self.solvent_mixer = solvent_mixer
         if solvent_mixer is not None and train_df is not None:
@@ -406,6 +434,53 @@ class SearchSpace:
 
 
 # ─────────────────────────────────────────────────────────────
+# Tail-reweighted sample weights
+# ─────────────────────────────────────────────────────────────
+def _compute_tail_weights(y, threshold=None, alpha=None, min_freq=None):
+    """Inverse-frequency sample weights that up-weight rare high-y rows.
+
+    The raw pxrd_score distribution is skewed toward 0–3, but BO only cares
+    about distinguishing the 7–9 region.  Standard MSE regression lets the
+    0–3 mass dominate the loss; weighting tail rows by the inverse of their
+    frequency refocuses surrogate capacity on the crystallinity-hit region.
+
+    Rows with y >= threshold are weighted by (1 / freq_of_their_bin) ** alpha.
+    Rows below threshold get weight 1.  Weights are renormalized so their
+    mean is 1, preserving the effective learning-rate / regularization scale.
+
+    Parameters
+    ----------
+    y : array-like of floats (raw pxrd_score, 0-9)
+    threshold, alpha, min_freq : overrides for config defaults.
+
+    Returns
+    -------
+    np.ndarray of sample weights, same length as y, mean ~ 1.
+    """
+    if threshold is None:
+        threshold = BO_TAIL_WEIGHT_THRESHOLD
+    if alpha is None:
+        alpha = BO_TAIL_WEIGHT_ALPHA
+    if min_freq is None:
+        min_freq = BO_TAIL_WEIGHT_MIN_FREQ
+
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    if n == 0 or alpha <= 0:
+        return np.ones(n, dtype=float)
+
+    # Bin into integer pxrd_score slots 0..10 (11 bins covers 0-9 with headroom)
+    bins = np.clip(np.round(y).astype(int), 0, 10)
+    counts = np.bincount(bins, minlength=11).astype(float)
+    freq = counts[bins] / float(n)
+    freq = np.clip(freq, min_freq, None)
+
+    w = np.where(y >= threshold, (1.0 / freq) ** alpha, 1.0)
+    mean_w = float(w.mean()) if w.mean() > 0 else 1.0
+    return w / mean_w
+
+
+# ─────────────────────────────────────────────────────────────
 # RegressionSurrogate
 # ─────────────────────────────────────────────────────────────
 class RegressionSurrogate:
@@ -427,12 +502,33 @@ class RegressionSurrogate:
         self.model_type = model_type
         self.bootstrap_ensemble = None  # set externally for XGB
         self.sigma_scale_ = None        # computed on first fit
+        # Subclasses that transform y (e.g. RankingRegressionSurrogate) set
+        # this to False so tail-weights aren't applied in a space where the
+        # threshold doesn't correspond to the raw pxrd_score meaning.
+        self.use_tail_weights = True
+
+    def _tail_weights_for(self, y):
+        """Return sample_weight array for raw y, or None if disabled."""
+        if not (self.use_tail_weights and BO_TAIL_WEIGHT_ENABLED
+                and BO_TAIL_WEIGHT_ALPHA > 0):
+            return None
+        return _compute_tail_weights(y)
+
+    def _regressor_step_name(self):
+        """Name of the final pipeline step — used to route sample_weight."""
+        return self.pipeline.steps[-1][0]
 
     def fit(self, X, y):
-        self.pipeline.fit(X, y)
+        sw = self._tail_weights_for(y)
+        fit_kwargs = {}
+        if sw is not None:
+            fit_kwargs[f"{self._regressor_step_name()}__sample_weight"] = sw
+
+        self.pipeline.fit(X, y, **fit_kwargs)
+
         if self.bootstrap_ensemble is not None:
             Xt = self._transform_features(X)
-            self.bootstrap_ensemble.fit(Xt, y)
+            self.bootstrap_ensemble.fit(Xt, y, sample_weight=sw)
 
         # One-time sigma calibration via K-fold CV
         if self.sigma_scale_ is None:
@@ -470,7 +566,13 @@ class RegressionSurrogate:
         for train_idx, val_idx in kf.split(X):
             try:
                 fold_pipe = clone(self.pipeline)
-                fold_pipe.fit(X[train_idx], y[train_idx])
+                sw_fold = self._tail_weights_for(y[train_idx])
+                fold_fit_kwargs = {}
+                if sw_fold is not None:
+                    fold_fit_kwargs[
+                        f"{self._regressor_step_name()}__sample_weight"
+                    ] = sw_fold
+                fold_pipe.fit(X[train_idx], y[train_idx], **fold_fit_kwargs)
 
                 # Transform validation data through preprocessing steps
                 Xv = np.asarray(X[val_idx])
@@ -506,7 +608,7 @@ class RegressionSurrogate:
                         M=min(self.bootstrap_ensemble.M, 10),
                         random_state=self.bootstrap_ensemble.random_state,
                     )
-                    fold_boot.fit(Xt_train, y[train_idx])
+                    fold_boot.fit(Xt_train, y[train_idx], sample_weight=sw_fold)
                     mu, sigma = fold_boot.predict(Xv)
                 else:
                     continue
@@ -602,6 +704,10 @@ class RankingRegressionSurrogate(RegressionSurrogate):
     def __init__(self, pipeline, model_type="rf"):
         super().__init__(pipeline, model_type)
         self._y_train_raw = None
+        # Rank normalization already flattens the 0–9 imbalance by mapping
+        # targets to uniform [0, 1].  Applying a raw-y tail threshold on top
+        # would double-penalize and use a meaningless cutoff in rank space.
+        self.use_tail_weights = False
 
     def fit(self, X, y):
         from scipy.stats import rankdata
@@ -747,12 +853,14 @@ class XGBoostBootstrapEnsemble:
         self.random_state = random_state
         self.models = []
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         rng = np.random.RandomState(self.random_state)
         n = len(y)
         self.models = []
         xgb_reg_fixed = {k: v for k, v in XGB_FIXED.items() if k not in ("eval_metric", "random_state")}
         xgb_reg_fixed["eval_metric"] = "rmse"
+        sw_arr = (np.asarray(sample_weight, dtype=float)
+                  if sample_weight is not None else None)
         for i in range(self.M):
             idx = rng.choice(n, size=n, replace=True)
             model = XGBRegressor(
@@ -760,8 +868,12 @@ class XGBoostBootstrapEnsemble:
                 **xgb_reg_fixed,
                 random_state=self.random_state + i,
             )
-            model.fit(X[idx] if isinstance(X, np.ndarray) else X.iloc[idx],
-                       y[idx])
+            X_boot = X[idx] if isinstance(X, np.ndarray) else X.iloc[idx]
+            y_boot = y[idx]
+            if sw_arr is not None:
+                model.fit(X_boot, y_boot, sample_weight=sw_arr[idx])
+            else:
+                model.fit(X_boot, y_boot)
             self.models.append(model)
         return self
 
@@ -901,6 +1013,145 @@ class LFBOAcquisition:
         return proba[:, pos_idx]
 
 
+class LFBOSSLAcquisition(LFBOAcquisition):
+    """LFBO-SSL: surrogate-pseudo-labelled extension of LFBO-EI.
+
+    Standard LFBO trains a classifier on the n_observed labelled rows only.
+    With small init sets (~10–30 syntheses) this leaves the classifier
+    chronically data-starved.  LFBO-SSL augments the classifier's training
+    set by pseudo-labelling every unevaluated pool candidate with the
+    regression surrogate's prediction, weighted by surrogate uncertainty so
+    confident predictions pull harder.
+
+    Pseudo-label scheme
+    -------------------
+    For each candidate j in the pool:
+      mu_j, sigma_j = surrogate.predict(x_j)
+      pseudo_label_j = 1 if mu_j >= tau else 0
+      base_w_j       = pseudo_weight                       (default 0.3)
+      if use_sigma:  base_w_j *= 1 / (1 + sigma_j / sigma_median)
+      pseudo-positives also weighted by predicted improvement
+      max(mu_j - tau, eps), normalised so the mean positive weight matches
+      the observed-positive mean weight.
+
+    Defensibility notes
+    -------------------
+    * Pseudo weights default to 0.3 — observed labels dominate.  A sweep over
+      {0.1, 0.3, 0.5, 1.0} should be reported alongside any headline result.
+    * Sigma calibration on the surrogate (RegressionSurrogate._calibrate_sigma)
+      is load-bearing: poorly-calibrated sigma makes the SSL weighting noise.
+    * Falls back to the parent LFBO path (no SSL) when:
+        - observed labels are degenerate (all-zero or all-one)
+        - surrogate is None
+        - no candidates in the pool
+    * Records `last_diagnostics` per call: n_pseudo_pos, frac_pseudo_pos,
+      sigma_median, sigma_p90, n_observed_pos.  Use this to audit whether
+      pseudo-labels are biasing toward an unrealistic hit rate.
+    """
+
+    def __init__(
+        self,
+        gamma=BO_LFBO_GAMMA,
+        random_state=RANDOM_STATE,
+        adaptive_gamma=BO_LFBO_ADAPTIVE_GAMMA,
+        pseudo_weight=None,
+        use_sigma=None,
+    ):
+        super().__init__(
+            gamma=gamma,
+            random_state=random_state,
+            adaptive_gamma=adaptive_gamma,
+        )
+        # Resolve config defaults at construction so callers can override per-run
+        from config import BO_LFBO_SSL_PSEUDO_WEIGHT, BO_LFBO_SSL_USE_SIGMA
+        self.pseudo_weight = (
+            BO_LFBO_SSL_PSEUDO_WEIGHT if pseudo_weight is None else pseudo_weight
+        )
+        self.use_sigma = (
+            BO_LFBO_SSL_USE_SIGMA if use_sigma is None else use_sigma
+        )
+        self.last_diagnostics = {}
+
+    def score(self, X_observed, y_observed, X_candidates, surrogate=None):
+        if surrogate is None or len(X_candidates) == 0:
+            return super().score(
+                X_observed, y_observed, X_candidates, surrogate=surrogate
+            )
+
+        gamma_t   = self._gamma_t(len(y_observed))
+        objective = OrdinalBOObjective(gamma=gamma_t)
+        labels, tau, sample_weight = objective.get_lfbo_labels(y_observed)
+
+        if objective.is_degenerate(labels):
+            return super().score(
+                X_observed, y_observed, X_candidates, surrogate=surrogate
+            )
+
+        mu_pool, sigma_pool = surrogate.predict(X_candidates)
+        mu_pool    = np.asarray(mu_pool,    dtype=float)
+        sigma_pool = np.asarray(sigma_pool, dtype=float)
+
+        pseudo_labels = (mu_pool >= tau).astype(int)
+
+        # Base pseudo weight
+        pseudo_w = np.full(len(X_candidates), float(self.pseudo_weight))
+
+        # Sigma-based confidence reweighting: confident (low sigma) predictions
+        # carry more influence.  Use median sigma as the scale so the weighting
+        # is invariant to absolute sigma units.
+        sigma_median = float(np.median(sigma_pool)) if len(sigma_pool) else 1.0
+        if self.use_sigma and sigma_median > 1e-10:
+            pseudo_w = pseudo_w / (1.0 + sigma_pool / sigma_median)
+
+        # LFBO-EI improvement weighting on pseudo-positives, mirroring the
+        # observed-side scheme so positives use the same weighting language.
+        pos_mask = pseudo_labels == 1
+        if pos_mask.any():
+            pos_improve = np.maximum(mu_pool[pos_mask] - tau, 1e-6)
+            # Normalise pseudo-positive weights so their mean matches the
+            # observed-positive mean weight; preserves the relative scale
+            # between observed and pseudo training rows.
+            obs_pos_mean = (
+                float(sample_weight[labels == 1].mean())
+                if (labels == 1).any() else 1.0
+            )
+            pseudo_pos_w = pos_improve / max(pos_improve.mean(), 1e-6) * obs_pos_mean
+            pseudo_w[pos_mask] = pseudo_w[pos_mask] * pseudo_pos_w
+
+        # Stack observed + pseudo training data
+        X_combined = np.vstack([X_observed, X_candidates])
+        y_combined = np.concatenate([labels, pseudo_labels])
+        w_combined = np.concatenate([sample_weight, pseudo_w])
+
+        # Diagnostics for audit / reporting
+        self.last_diagnostics = {
+            "n_observed":        int(len(labels)),
+            "n_observed_pos":    int(labels.sum()),
+            "n_pseudo":          int(len(pseudo_labels)),
+            "n_pseudo_pos":      int(pseudo_labels.sum()),
+            "frac_pseudo_pos":   float(pseudo_labels.mean()),
+            "sigma_median":      sigma_median,
+            "sigma_p90":         float(np.percentile(sigma_pool, 90))
+                                  if len(sigma_pool) else 0.0,
+            "tau":               float(tau),
+            "gamma_t":           float(gamma_t),
+        }
+
+        # Guard: pseudo-labels can be all-zero or all-one when surrogate is very
+        # over- or under-predictive.  Combined with observed labels this is fine
+        # because labels still has both classes (we returned early otherwise),
+        # but assert just in case.
+        if len(np.unique(y_combined)) < 2:
+            return super().score(
+                X_observed, y_observed, X_candidates, surrogate=surrogate
+            )
+
+        self.clf.fit(X_combined, y_combined, sample_weight=w_combined)
+        pos_idx = list(self.clf.classes_).index(1)
+        proba = self.clf.predict_proba(X_candidates)
+        return proba[:, pos_idx]
+
+
 class ThompsonSamplingAcquisition:
     """Thompson Sampling: sample one tree from RF regressor ensemble."""
 
@@ -943,7 +1194,7 @@ class BatchSelector:
     """Batch selection via Constant Liar, Kriging Believer, or Diverse Greedy."""
 
     # Process-parameter columns used for diversity distance.
-    _PROC_COLS = ["temperature_k", "total_conc", "phi_1", "equivalents",
+    _PROC_COLS = ["temperature_k", "linker_conc", "phi_1", "equivalents",
                   "metal_over_linker_ratio"]
 
     @staticmethod
@@ -951,6 +1202,7 @@ class BatchSelector:
         surrogate, X_train, y_train, X_candidates,
         candidates_df, acquisition_name, batch_size,
         diversity_lambda=0.3,
+        acq_vals=None,
         **acq_kwargs,
     ):
         """Greedy quality-diversity batch selection.
@@ -989,11 +1241,15 @@ class BatchSelector:
         """
         n_cand = X_candidates.shape[0]
 
-        # --- Step 1: score all candidates once ---
-        acq_vals = _compute_acquisition(
-            acquisition_name, surrogate, X_train, y_train,
-            X_candidates, **acq_kwargs
-        )
+        # --- Step 1: score all candidates once (or use pre-computed values) ---
+        # When acq_vals is provided by the caller (e.g. main.py after applying
+        # a degenerate-acquisition fallback), skip recomputation so the batch
+        # selector and the headline acquisition see the same numbers.
+        if acq_vals is None:
+            acq_vals = _compute_acquisition(
+                acquisition_name, surrogate, X_train, y_train,
+                X_candidates, **acq_kwargs
+            )
 
         af_min, af_max = acq_vals.min(), acq_vals.max()
         af_norm = (acq_vals - af_min) / (af_max - af_min + 1e-9)
@@ -1151,7 +1407,7 @@ def _compute_acquisition(
 ):
     """Dispatch acquisition function by name.
 
-    Supported names: "lfbo", "ei", "thompson", "random", "consensus".
+    Supported names: "lfbo", "lfbo_ssl", "ei", "thompson", "random", "consensus".
     """
     if name == "ei":
         mu, sigma = surrogate.predict(X_candidates)
@@ -1162,7 +1418,7 @@ def _compute_acquisition(
         return EIAcquisition(xi=kwargs.get("xi", BO_EI_XI)).score(mu, sigma, f_best)
 
     elif name == "lfbo":
-        lfbo = LFBOAcquisition(
+        lfbo = kwargs.get("lfbo_instance") or LFBOAcquisition(
             gamma=kwargs.get("gamma", BO_LFBO_GAMMA),
             random_state=kwargs.get("random_state", RANDOM_STATE),
             adaptive_gamma=kwargs.get(
@@ -1170,6 +1426,20 @@ def _compute_acquisition(
             ),
         )
         return lfbo.score(X_train, y_train, X_candidates, surrogate=surrogate)
+
+    elif name == "lfbo_ssl":
+        lfbo_ssl = kwargs.get("lfbo_ssl_instance") or LFBOSSLAcquisition(
+            gamma=kwargs.get("gamma", BO_LFBO_GAMMA),
+            random_state=kwargs.get("random_state", RANDOM_STATE),
+            adaptive_gamma=kwargs.get(
+                "lfbo_adaptive_gamma", BO_LFBO_ADAPTIVE_GAMMA
+            ),
+            pseudo_weight=kwargs.get("lfbo_ssl_pseudo_weight"),
+            use_sigma=kwargs.get("lfbo_ssl_use_sigma"),
+        )
+        return lfbo_ssl.score(
+            X_train, y_train, X_candidates, surrogate=surrogate
+        )
 
     elif name == "consensus":
         return _consensus_acquisition(
@@ -1251,7 +1521,7 @@ class CandidateFeaturizer:
     Handles four categories of derived features:
       1. Process knobs  — proc_raw:X (raw) + proc:X (MinMax-normalised)
       2. Solvent fractions — proc_raw/proc solvent_1/2_fraction from phi_1
-      3. Concentration cols — metal_conc / linker_conc / umol_* from total_conc + ratio
+      3. Concentration cols — total_conc / metal_conc / mod_conc / umol_* from linker_conc + ratio + equiv
       4. COSMO features   — computed on-the-fly via CosmoMixer from (sol1, sol2, phi_1)
       5. Interaction terms — recomputed from updated normalised process values
     """
@@ -1334,21 +1604,53 @@ class CandidateFeaturizer:
             if col in candidates_df.columns:
                 self._set_proc(X, col, candidates_df[col].values.astype(float))
 
+        # ── 1a. metal_over_linker_ratio (BO_OPTIONAL_PARAMS, not in the loop) ──
+        # Always write the ratio into proc:/proc_raw: slots when present in
+        # candidates_df.  This covers both --bo-include-mlr (LHS-sampled ratio)
+        # and fixed-chemistry mode (ratio broadcast to a stoichiometric scalar
+        # upstream).  Without this, the direct ratio feature cell stays at the
+        # template value, creating a mismatch with derived metal_conc and the
+        # proc_int:*metal_ratio* interaction terms.
+        if "metal_over_linker_ratio" in candidates_df.columns:
+            self._set_proc(
+                X, "metal_over_linker_ratio",
+                candidates_df["metal_over_linker_ratio"].values.astype(float),
+            )
+
         # ── 1b. Fix total_solvent_volume_ml to the configured synthesis volume ──
         self._set_proc(X, "total_solvent_volume_ml",
                        np.full(n, self.total_volume_ml))
 
         # ── 2. phi_1 → solvent fractions ─────────────────────────────────────
+        # Force pure-solvent_1 fractions when solvent_2 is missing so the
+        # process features stay consistent with the COSMO mixer (which treats
+        # an empty solvent_2 as pure sol1 regardless of phi_1).  Without this
+        # guard, a single-solvent candidate with LHS-sampled phi_1=0.3 gets
+        # featurized as "30% sol1 + 70% nothing", which mismatches both the
+        # COSMO row and the training-data convention (pure rows have phi_1=1).
         phi_1 = np.clip(
             candidates_df.get("phi_1", pd.Series(np.ones(n))).values.astype(float),
             0.0, 1.0,
         )
-        self._set_proc(X, "solvent_1_fraction", phi_1)
-        self._set_proc(X, "solvent_2_fraction", 1.0 - phi_1)
+        sol2_arr = candidates_df.get(
+            "solvent_2", pd.Series([""] * n)
+        ).values
+        sol2_missing = np.array([
+            (s is None)
+            or (isinstance(s, float) and np.isnan(s))
+            or (str(s).strip().upper() in ("", "NAN", "NONE"))
+            for s in sol2_arr
+        ])
+        phi_1_eff = np.where(sol2_missing, 1.0, phi_1)
+        self._set_proc(X, "solvent_1_fraction", phi_1_eff)
+        self._set_proc(X, "solvent_2_fraction", 1.0 - phi_1_eff)
+        # Use the effective phi_1 downstream (e.g. COSMO) so every per-row
+        # value the surrogate sees agrees with the fraction columns.
+        phi_1 = phi_1_eff
 
-        # ── 3. Derive concentration cols from total_conc + ratio + volume ─────
-        if "total_conc" in candidates_df.columns:
-            total_conc = candidates_df["total_conc"].values.astype(float)
+        # ── 3. Derive concentration cols from linker_conc + ratio + equiv ──���──
+        if "linker_conc" in candidates_df.columns:
+            linker_conc = candidates_df["linker_conc"].values.astype(float)
             ratio = candidates_df.get(
                 "metal_over_linker_ratio", pd.Series(np.ones(n))
             ).values.astype(float)
@@ -1357,25 +1659,25 @@ class CandidateFeaturizer:
                 "equivalents", pd.Series(np.ones(n))
             ).values.astype(float)
 
-            # total_conc = (linker + metal + modulator) / volume
-            # metal      = ratio * linker
-            # modulator  = equiv * linker
-            denom       = 1.0 + ratio + equiv
-            linker_conc = total_conc / denom
+            # linker_conc is the direct BO knob (µmol/mL)
+            # metal_conc  = ratio * linker_conc
+            # mod_conc    = equiv * linker_conc
+            # total_conc  = linker_conc * (1 + ratio + equiv)
             metal_conc  = ratio * linker_conc
+            mod_conc    = equiv * linker_conc
+            total_conc  = linker_conc * (1.0 + ratio + equiv)
             umol_linker = linker_conc * self.total_volume_ml
             umol_metal  = metal_conc  * self.total_volume_ml
-            umol_mod    = equiv * umol_linker
-            mod_conc    = umol_mod / self.total_volume_ml
+            umol_mod    = mod_conc    * self.total_volume_ml
 
             for col, vals in [
-                ("total_conc",           total_conc),
-                ("metal_conc",           metal_conc),
                 ("linker_conc",          linker_conc),
+                ("metal_conc",           metal_conc),
+                ("mod_conc",             mod_conc),
+                ("total_conc",           total_conc),
                 ("umol_metal_precursor", umol_metal),
                 ("umol_linker",          umol_linker),
                 ("umol_modulator",       umol_mod),
-                ("mod_conc",             mod_conc),
             ]:
                 self._set_proc(X, col, vals)
 
@@ -1525,13 +1827,34 @@ class NeighborhoodTemplateSelector:
     _PARAM_TO_COL = {
         "equivalents":             "equivalents",
         "temperature_k":           "temperature_k",
-        "total_conc":              "total_conc",
+        "linker_conc":             "linker_conc",
         "phi_1":                   "solvent_1_fraction",
         "metal_over_linker_ratio": "metal_over_linker_ratio",
     }
 
-    # Feature groups that represent process / non-chemistry information
-    _PROCESS_GROUPS = {"Process", "Process_Interaction", "Unknown"}
+    # Feature groups that represent process / non-chemistry information.
+    # Must match the exact labels emitted by build_feature_catalog().
+    # "Unknown" is intentionally excluded: when the catalog is missing and all
+    # cols default to "Unknown", we want the full vector used for cosine sim
+    # rather than zero chemistry cols.
+    #
+    # Modulator-descriptor blocks are excluded from the chemistry similarity
+    # because modulator presence is a process decision (you choose whether to
+    # add it during synthesis). Including them caused same-linker/precursor
+    # rows with different modulator usage to land far apart in cosine space —
+    # the Mordred RAC block for the modulator scales with equivalents and can
+    # reach magnitudes ~1e4, dominating the cosine. Stage-1 Morgan FP already
+    # represents modulator chemistry separately with weight=0.10.
+    _PROCESS_GROUPS = {
+        "Process Variables",
+        "Process Variables (raw)",
+        "Process Interactions",
+        "Modulator Morgan FP",
+        "Modulator Equiv.",
+        "Modulator RAC",
+        "Mod Physchem/FP",
+        "Mod ChemBERT",
+    }
 
     def __init__(
         self,
@@ -1543,8 +1866,8 @@ class NeighborhoodTemplateSelector:
         modulator_col="smiles_modulator",
         score_col="pxrd_score",
         fp_blend=0.3,
-        linker_weight=0.60,
-        precursor_weight=0.30,
+        linker_weight=0.35,
+        precursor_weight=0.55,
         modulator_weight=0.10,
         top_k=15,
         min_similarity=0.05,
@@ -1566,8 +1889,12 @@ class NeighborhoodTemplateSelector:
         fp_blend             : float in [0,1] — weight given to Morgan FP similarity
                                vs chemistry feature cosine similarity (default 0.3).
                                Lower = trust the surrogate features more.
-        linker_weight        : float — weight for linker in FP similarity (default 0.60)
-        precursor_weight     : float — weight for precursor in FP similarity (default 0.30)
+        linker_weight        : float — weight for linker in FP similarity (default 0.35)
+        precursor_weight     : float — weight for precursor in FP similarity (default 0.55).
+                               Higher than linker weight because metal identity
+                               is the dominant determinant of MOF assembly
+                               conditions (T, conc, equiv transfer poorly across
+                               metals but well across linkers for a fixed metal).
         modulator_weight     : float — weight for modulator in FP similarity (default 0.10).
                                Only applied when a target modulator SMILES is provided.
                                Weights are renormalized when modulator is absent.
@@ -2099,6 +2426,7 @@ class BOCheckpointer:
 VALID_BATCH_STRATEGIES = {
     "ei":        ["constant_liar", "kriging_believer"],
     "lfbo":      ["diverse_greedy"],
+    "lfbo_ssl":  ["diverse_greedy"],
     "consensus": ["diverse_greedy"],
     "thompson":  ["diverse_greedy"],
     "random":    ["diverse_greedy"],
@@ -2108,6 +2436,7 @@ VALID_BATCH_STRATEGIES = {
 DEFAULT_BATCH_STRATEGY = {
     "ei":        "kriging_believer",
     "lfbo":      "diverse_greedy",
+    "lfbo_ssl":  "diverse_greedy",
     "consensus": "diverse_greedy",
     "thompson":  "diverse_greedy",
     "random":    "diverse_greedy",
@@ -2163,6 +2492,20 @@ class BOLoop:
         self.rng = np.random.RandomState(random_state)
         self.random_state = random_state
         self.lfbo_adaptive_gamma = lfbo_adaptive_gamma
+
+        # Pre-allocate LFBO acquisition so the RF classifier object is
+        # reused across iterations instead of re-created every call.
+        self._lfbo = LFBOAcquisition(
+            gamma=BO_LFBO_GAMMA,
+            random_state=random_state,
+            adaptive_gamma=lfbo_adaptive_gamma,
+        ) if acquisition_name in ("lfbo", "consensus") else None
+
+        self._lfbo_ssl = LFBOSSLAcquisition(
+            gamma=BO_LFBO_GAMMA,
+            random_state=random_state,
+            adaptive_gamma=lfbo_adaptive_gamma,
+        ) if acquisition_name == "lfbo_ssl" else None
 
     def run_simulation(self, X, y_raw, init_fraction=BO_INIT_FRACTION,
                        groups=None,
@@ -2333,8 +2676,8 @@ class BOLoop:
                     "f_best": f_best,
                     "gamma": BO_LFBO_GAMMA,
                     "random_state": self.random_state + it,
-
                     "lfbo_adaptive_gamma": self.lfbo_adaptive_gamma,
+                    "lfbo_instance": self._lfbo,
                 }
                 acq_vals = _compute_acquisition(
                     self.acquisition_name, self.surrogate,
@@ -2394,7 +2737,7 @@ class BOLoop:
             size so that small clusters are evaluated under the same budget
             pressure as large ones (default 0.30 = match the 30/70 split).
             Without this, a cluster of 25 experiments tested over 50 iterations
-            exhausts the entire pool, inflating Top-5% and AF.
+            exhausts the entire pool, inflating hit-discovery rate and AF.
 
         Returns the same history dict as run_simulation.
         """
@@ -2500,6 +2843,8 @@ class BOLoop:
                 "gamma": BO_LFBO_GAMMA,
                 "random_state": self.random_state + batch_it,
                 "lfbo_adaptive_gamma": self.lfbo_adaptive_gamma,
+                "lfbo_instance": self._lfbo,
+                "lfbo_ssl_instance": self._lfbo_ssl,
             }
 
             if self.batch_strategy == "diverse_greedy":
@@ -2563,6 +2908,8 @@ class BOLoop:
             "f_best": y_train.max(),
             "gamma": BO_LFBO_GAMMA,
             "random_state": self.random_state,
+            "lfbo_instance": self._lfbo,
+            "lfbo_ssl_instance": self._lfbo_ssl,
         }
         acq_vals = _compute_acquisition(
             self.acquisition_name, self.surrogate,

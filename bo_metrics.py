@@ -1,16 +1,21 @@
 """
 bo_metrics.py — Simulation metrics and visualization for BO benchmarking.
 
+All success metrics use a single threshold-based criterion: a "hit" is a row
+with pxrd_score >= config.BO_HIT_THRESHOLD (default 7.0, crystalline product).
+This unifies the acquisition target, the gamma sweep, and the headline AF/EF
+numbers around the same scientific definition of success.
+
 Classes:
-  SimulationMetrics — AF, EF, Top%, cumulative best, simple regret tracking
+  SimulationMetrics — AF, EF, hit-discovery rate, simple regret tracking
 
 Functions:
   plot_convergence()              — cumulative best vs iteration
   plot_average_score()            — rolling mean of selected scores vs iteration
-  plot_topk_curves()              — Top% vs evaluations
+  plot_topk_curves()              — hit-discovery rate vs evaluations
   plot_simple_regret()            — simple regret (y_best_possible - y_best_found) vs iteration
   plot_af_ef_comparison()         — AF/EF bar charts across ablation conditions
-  plot_seed_aggregated_comparison() — mean ± std AF/EF error bar chart across seeds
+  plot_seed_aggregated_comparison() — mean ± std AF/EF/Hit% error bar chart across seeds
   plot_sensitive_heatmap()        — acquisition × surrogate heatmap of mean AF
   plot_seed_averaged_convergence() — convergence bands (mean ± std) collapsed over seeds
   plot_batch_comparison()         — constant_liar vs kriging_believer
@@ -28,89 +33,113 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.stats import norm as scipy_norm
 
+from config import BO_HIT_THRESHOLD
+
 
 # ─────────────────────────────────────────────────────────────
 # SimulationMetrics
 # ─────────────────────────────────────────────────────────────
 class SimulationMetrics:
-    """Compute Liang et al. metrics for BO simulation evaluation.
+    """Threshold-based BO simulation metrics.
+
+    All metrics share a single success criterion: y >= hit_threshold.
 
     Metrics:
-      AF   — Acceleration Factor: how much faster BO finds top-k vs random
-      EF   — Enhancement Factor: quality of BO selections vs random
-      Top% — fraction of top-p% discovered after N evaluations
-      Cumulative best — best observed score vs iteration
+      AF       — Acceleration Factor: (fraction of pool-hits found) / (fraction
+                 of pool evaluated). AF=1 is random; >1 means BO finds hits
+                 faster than uniform sampling. NaN when the pool contains no
+                 hits (the metric is undefined, not zero).
+      EF       — Enhancement Factor (graded quality ratio):
+                 mean(y_selected) / mean(y_pool). EF=1 is random;
+                 threshold-agnostic — captures graded selection quality that
+                 the binary AF can miss (e.g. selections at y=6 vs y=3 both
+                 count as misses for AF but differ in EF).
+      Hit%     — Fraction of BO selections with y >= threshold.
+      HitDisc% — Fraction of pool hits discovered after N evaluations.
+      Cumulative best, simple regret — convergence diagnostics.
     """
 
-    def __init__(self, y_all, top_fraction=0.05):
+    def __init__(self, y_all, hit_threshold=None):
         """
         Parameters
         ----------
-        y_all : array — all raw 0-9 pxrd_scores in the dataset
-        top_fraction : float — define "top" as this fraction (default 5%)
+        y_all         : array — all raw 0-9 pxrd_scores in the dataset
+        hit_threshold : float or None — y >= threshold counts as a hit.
+                        Defaults to config.BO_HIT_THRESHOLD.
         """
         self.y_all = np.asarray(y_all, dtype=float)
-        self.top_fraction = top_fraction
+        self.hit_threshold = (BO_HIT_THRESHOLD if hit_threshold is None
+                              else float(hit_threshold))
         self.n_total = len(self.y_all)
 
-        # Identify top-k indices
-        k = max(1, int(np.ceil(self.n_total * top_fraction)))
-        sorted_idx = np.argsort(self.y_all)[::-1]
-        self.top_k_indices = set(sorted_idx[:k].tolist())
-        self.top_k_threshold = self.y_all[sorted_idx[k - 1]]
-        self.k = k
+        # Identify hits (y >= threshold)
+        hit_mask = self.y_all >= self.hit_threshold
+        self.hit_indices = set(np.where(hit_mask)[0].tolist())
+        self.n_hits = len(self.hit_indices)
+        self.baseline_hit_rate = self.n_hits / max(self.n_total, 1)
 
     def acceleration_factor(self, selected_indices, n_init, init_indices=None):
-        """AF = (fraction of pool-top-k found) / (fraction of pool evaluated).
+        """AF = (fraction of pool-hits found) / (fraction of pool evaluated).
 
-        Top-k is restricted to candidates actually in the pool (excluding init),
-        so random selection has an expected AF of 1.0.
+        Hits are restricted to candidates actually in the pool (excluding init),
+        so random selection has an expected AF of 1.0. Returns NaN when the
+        pool contains no hits — the metric is undefined, not zero, and lumping
+        them as zeros biases aggregate means downward.
         """
         n_evaluated = len(selected_indices)
         if n_evaluated == 0:
-            return 0.0
+            return float("nan")
 
-        # Restrict top-k to members in the pool (not the init set)
         if init_indices is not None:
             init_set = set(init_indices)
-            pool_topk = self.top_k_indices - init_set
+            pool_hits = self.hit_indices - init_set
         else:
-            pool_topk = self.top_k_indices
-        k_pool = len(pool_topk)
-        if k_pool == 0:
-            return 0.0
+            pool_hits = self.hit_indices
+        n_pool_hits = len(pool_hits)
+        if n_pool_hits == 0:
+            return float("nan")
 
         n_pool = self.n_total - n_init
         frac_evaluated = n_evaluated / max(n_pool, 1)
 
-        found = sum(1 for idx in selected_indices if idx in pool_topk)
-        frac_found = found / k_pool
+        found = sum(1 for idx in selected_indices if idx in pool_hits)
+        frac_found = found / n_pool_hits
 
-        return frac_found / frac_evaluated if frac_evaluated > 0 else 0.0
+        return frac_found / frac_evaluated if frac_evaluated > 0 else float("nan")
 
-    def enhancement_factor(self, selected_indices):
-        """EF = mean(y_selected) / mean(y_all).
+    def enhancement_factor(self, selected_indices, init_indices=None):
+        """EF = mean(y_selected) / mean(y_pool) — graded quality ratio.
 
-        EF > 1 means BO is selecting better-than-average experiments.
+        Complements AF: AF measures *speed* of discovery at the binary
+        hit_threshold; EF measures graded *quality* of selections vs the
+        pool's average score (threshold-agnostic by design — a hit-rate-based
+        EF is algebraically equivalent to AF and would carry no new info).
+
+        Pool-aware: excludes the init set from the baseline so a high-quality
+        init split doesn't depress EF.
         """
         if len(selected_indices) == 0:
-            return 0.0
-        y_selected = self.y_all[selected_indices]
-        mean_all = self.y_all.mean()
-        if mean_all == 0:
-            return 0.0
-        return y_selected.mean() / mean_all
+            return float("nan")
+        if init_indices is not None and len(init_indices) > 0:
+            pool_mask = np.ones(self.n_total, dtype=bool)
+            pool_mask[list(init_indices)] = False
+            mean_pool = float(self.y_all[pool_mask].mean()) if pool_mask.any() else 0.0
+        else:
+            mean_pool = float(self.y_all.mean())
+        if mean_pool <= 0:
+            return float("nan")
+        return float(self.y_all[selected_indices].mean() / mean_pool)
 
-    def top_percent_curve(self, history):
-        """Compute fraction of pool-top-k discovered vs iteration.
+    def hit_discovery_curve(self, history):
+        """Cumulative fraction of pool-hits discovered vs iteration.
 
-        Only counts top-k members that were in the pool (not init).
+        Only counts hits that were in the pool (not init).
         Returns arrays (iterations, frac_discovered).
         """
         init_set = set(history.get("init_indices", []))
-        pool_topk = self.top_k_indices - init_set
-        k_pool = len(pool_topk)
-        if k_pool == 0:
+        pool_hits = self.hit_indices - init_set
+        n_pool_hits = len(pool_hits)
+        if n_pool_hits == 0:
             iters = list(range(1, len(history["selected_indices"]) + 1))
             return np.array(iters), np.zeros(len(iters))
 
@@ -118,9 +147,9 @@ class SimulationMetrics:
         fracs = []
 
         for idx in history["selected_indices"]:
-            if idx in pool_topk:
+            if idx in pool_hits:
                 found.add(idx)
-            fracs.append(len(found) / k_pool)
+            fracs.append(len(found) / n_pool_hits)
 
         iterations = list(range(1, len(fracs) + 1))
         return np.array(iterations), np.array(fracs)
@@ -151,31 +180,52 @@ class SimulationMetrics:
         init_indices = history.get("init_indices", [])
         n_init = len(init_indices)
         af = self.acceleration_factor(sel, n_init, init_indices=init_indices)
-        ef = self.enhancement_factor(sel)
-        _, top_curve = self.top_percent_curve(history)
-        final_top = top_curve[-1] if len(top_curve) > 0 else 0.0
+        ef = self.enhancement_factor(sel, init_indices=init_indices)
+        _, hit_curve = self.hit_discovery_curve(history)
+        hit_discovery_rate = float(hit_curve[-1]) if len(hit_curve) > 0 else 0.0
         final_best = history["best_so_far"][-1] if history["best_so_far"] else 0.0
 
         _, regret_curve = self.simple_regret_curve(history)
         final_regret = float(regret_curve[-1]) if len(regret_curve) > 0 else float(self.y_all.max())
 
+        if len(sel) > 0:
+            hit_rate = float((self.y_all[sel] >= self.hit_threshold).mean())
+        else:
+            hit_rate = 0.0
+        if init_indices:
+            pool_mask = np.ones(self.n_total, dtype=bool)
+            pool_mask[list(init_indices)] = False
+            baseline_hit_rate = float(
+                (self.y_all[pool_mask] >= self.hit_threshold).mean()
+            ) if pool_mask.any() else 0.0
+        else:
+            baseline_hit_rate = self.baseline_hit_rate
+
         return {
             "AF": af,
             "EF": ef,
-            "Top_percent_final": final_top,
+            "hit_rate": hit_rate,
+            "baseline_hit_rate": baseline_hit_rate,
+            "hit_discovery_rate": hit_discovery_rate,
             "best_score_final": final_best,
             "simple_regret_final": final_regret,
             "n_evaluated": len(sel),
             "n_init": n_init,
+            "hit_threshold": self.hit_threshold,
         }
 
 
     def per_cluster_summary(self, history, groups):
-        """Compute AF, EF, Top-5% broken down by chemistry cluster.
+        """Compute threshold-based AF, EF, Hit% per chemistry cluster.
 
         For each cluster, metrics are computed *within* that cluster's pool —
-        i.e. top-5% is relative to the cluster, not the global dataset.  This
-        answers "did the BO find the best experiments *within* cluster X?"
+        AF asks "did BO find this cluster's hits faster than uniform sampling?"
+        EF asks "are BO's selections in this cluster richer in hits than the
+        cluster's base rate?" Both share the global `hit_threshold`.
+
+        Returns NaN for AF/EF in clusters with no hits in the pool — the
+        metric is undefined there, and lumping those as zeros biases the
+        aggregate downward.
 
         Parameters
         ----------
@@ -184,12 +234,16 @@ class SimulationMetrics:
 
         Returns
         -------
-        dict : {cluster_id: {"AF": float, "EF": float, "Top%": float,
-                              "n_pool": int, "n_selected": int}}
+        dict : {cluster_id: {"AF": float, "EF": float,
+                              "hit_rate": float, "baseline_hit": float,
+                              "hit_discovery_rate": float,
+                              "n_pool": int, "n_selected": int,
+                              "n_pool_hits": int}}
         """
         groups = np.asarray(groups, dtype=int)
         init_set = set(history.get("init_indices", []))
         selected = history["selected_indices"]
+        thr = self.hit_threshold
         results = {}
 
         for cid in sorted(np.unique(groups)):
@@ -202,39 +256,48 @@ class SimulationMetrics:
             n_sel_c  = len(selected_in_cluster)
 
             if n_pool_c == 0:
-                results[cid] = {"AF": 0.0, "EF": 0.0, "Top%": 0.0,
-                                "n_pool": 0, "n_selected": 0}
+                results[cid] = {
+                    "AF": float("nan"), "EF": float("nan"),
+                    "hit_rate": 0.0, "baseline_hit": 0.0,
+                    "hit_discovery_rate": 0.0,
+                    "n_pool": 0, "n_selected": 0, "n_pool_hits": 0,
+                }
                 continue
 
-            # Cluster-local top-5%
             y_pool_c = self.y_all[sorted(pool_in_cluster)]
-            k_c = max(1, int(np.ceil(n_pool_c * self.top_fraction)))
-            threshold_c = np.sort(y_pool_c)[::-1][min(k_c - 1, len(y_pool_c) - 1)]
-            pool_list = sorted(pool_in_cluster)
-            top_k_local = set()
-            for idx in pool_list:
-                if self.y_all[idx] >= threshold_c:
-                    top_k_local.add(idx)
-                    if len(top_k_local) >= k_c:
-                        break
+            pool_hits_c = {idx for idx in pool_in_cluster
+                           if self.y_all[idx] >= thr}
+            n_pool_hits_c = len(pool_hits_c)
 
-            found = sum(1 for s in selected_in_cluster if s in top_k_local)
-            frac_found = found / max(k_c, 1)
-            frac_eval  = n_sel_c / max(n_pool_c, 1)
-            af = frac_found / frac_eval if frac_eval > 0 else 0.0
+            y_sel = self.y_all[selected_in_cluster] if n_sel_c > 0 else np.array([])
+            hit_rate = float((y_sel >= thr).mean()) if n_sel_c > 0 else 0.0
+            baseline_hit = float((y_pool_c >= thr).mean())
 
-            y_sel = self.y_all[selected_in_cluster] if n_sel_c > 0 else np.array([0.0])
-            y_pool_mean = y_pool_c.mean() if len(y_pool_c) > 0 else 1e-9
-            ef = float(y_sel.mean() / max(y_pool_mean, 1e-9))
+            if n_pool_hits_c == 0 or n_sel_c == 0:
+                af = float("nan")
+                hit_discovery_rate = 0.0
+            else:
+                found = sum(1 for s in selected_in_cluster if s in pool_hits_c)
+                hit_discovery_rate = found / n_pool_hits_c
+                frac_found = hit_discovery_rate
+                frac_eval  = n_sel_c / n_pool_c
+                af = frac_found / frac_eval if frac_eval > 0 else float("nan")
 
-            # Hit rate: fraction of BO selections with score >= 7
-            hit_rate = float((y_sel >= 7).mean()) if n_sel_c > 0 else 0.0
-            baseline_hit = float((y_pool_c >= 7).mean()) if len(y_pool_c) > 0 else 0.0
+            # EF = graded quality ratio (mirror of global EF). Distinct from AF:
+            # rewards selections that score high even when they miss the binary
+            # hit threshold.
+            mean_pool_c = float(y_pool_c.mean()) if len(y_pool_c) > 0 else 0.0
+            if n_sel_c == 0 or mean_pool_c <= 0:
+                ef = float("nan")
+            else:
+                ef = float(y_sel.mean() / mean_pool_c)
 
             results[cid] = {
-                "AF": af, "EF": ef, "Top%": frac_found,
+                "AF": af, "EF": ef,
                 "hit_rate": hit_rate, "baseline_hit": baseline_hit,
+                "hit_discovery_rate": hit_discovery_rate,
                 "n_pool": n_pool_c, "n_selected": n_sel_c,
+                "n_pool_hits": n_pool_hits_c,
             }
 
         return results
@@ -309,18 +372,23 @@ def plot_average_score(histories, labels, window=10, save_path="docs/bo_avg_scor
 
 
 def plot_topk_curves(histories, labels, y_all, save_path="docs/bo_topk.png"):
-    """Plot Top% discovery rate vs evaluations for multiple methods."""
+    """Plot hit-discovery rate vs evaluations for multiple methods.
+
+    Hit = y >= BO_HIT_THRESHOLD. The y-axis is the cumulative fraction of pool
+    hits found by BO, so a perfect run reaches 100% once every hit is queried.
+    """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     fig, ax = plt.subplots(figsize=(10, 6))
     metrics = SimulationMetrics(y_all)
+    thr = metrics.hit_threshold
 
     for hist, label in zip(histories, labels):
-        iters, fracs = metrics.top_percent_curve(hist)
+        iters, fracs = metrics.hit_discovery_curve(hist)
         ax.plot(iters, fracs * 100, label=label, linewidth=2)
 
     ax.set_xlabel("BO Iteration")
-    ax.set_ylabel(f"Top-{metrics.top_fraction*100:.0f}% Discovered (%)")
-    ax.set_title("Top-k Discovery Rate")
+    ax.set_ylabel(f"Pool Hits Discovered (y >= {thr:.0f}) [%]")
+    ax.set_title("Hit Discovery Rate")
     ax.legend(loc="lower right")
     ax.grid(True, alpha=0.3)
     ax.set_ylim(0, 105)
@@ -588,21 +656,21 @@ def plot_seed_aggregated_comparison(
         # Strip seed component: everything after the last |seed=
         parts = label.split("|")
         method = "|".join(p for p in parts if not p.startswith("seed="))
-        groups.setdefault(method, {"AF": [], "EF": [], "Top%": []})
+        groups.setdefault(method, {"AF": [], "EF": [], "HitDisc%": []})
         groups[method]["AF"].append(s["AF"])
         groups[method]["EF"].append(s["EF"])
-        groups[method]["Top%"].append(s["Top_percent_final"] * 100)
+        groups[method]["HitDisc%"].append(s["hit_discovery_rate"] * 100)
 
     methods = list(groups.keys())
-    af_means  = np.array([np.mean(groups[m]["AF"])  for m in methods])
-    af_stds   = np.array([np.std(groups[m]["AF"])   for m in methods])
-    ef_means  = np.array([np.mean(groups[m]["EF"])  for m in methods])
-    ef_stds   = np.array([np.std(groups[m]["EF"])   for m in methods])
-    top_means = np.array([np.mean(groups[m]["Top%"]) for m in methods])
-    top_stds  = np.array([np.std(groups[m]["Top%"])  for m in methods])
+    af_means  = np.array([np.nanmean(groups[m]["AF"])  for m in methods])
+    af_stds   = np.array([np.nanstd(groups[m]["AF"])   for m in methods])
+    ef_means  = np.array([np.nanmean(groups[m]["EF"])  for m in methods])
+    ef_stds   = np.array([np.nanstd(groups[m]["EF"])   for m in methods])
+    top_means = np.array([np.mean(groups[m]["HitDisc%"]) for m in methods])
+    top_stds  = np.array([np.std(groups[m]["HitDisc%"])  for m in methods])
 
-    # Sort by mean AF descending
-    order = np.argsort(af_means)[::-1]
+    # Sort by mean AF descending (NaNs to the bottom)
+    order = np.argsort(np.where(np.isnan(af_means), -np.inf, af_means))[::-1]
     methods   = [methods[i]   for i in order]
     af_means  = af_means[order];  af_stds  = af_stds[order]
     ef_means  = ef_means[order];  ef_stds  = ef_stds[order]
@@ -612,9 +680,9 @@ def plot_seed_aggregated_comparison(
     fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
     for ax, means, stds, ylabel, title, baseline in [
-        (axes[0], af_means,  af_stds,  "AF",         "Acceleration Factor (mean ± std)", 1.0),
-        (axes[1], ef_means,  ef_stds,  "EF",         "Enhancement Factor (mean ± std)",  1.0),
-        (axes[2], top_means, top_stds, "Top-5% (%)", "Top-5% Discovered (mean ± std)",   None),
+        (axes[0], af_means,  af_stds,  "AF",          "Acceleration Factor (mean ± std)", 1.0),
+        (axes[1], ef_means,  ef_stds,  "EF",          "Enrichment Factor (mean ± std)",   1.0),
+        (axes[2], top_means, top_stds, "Hit Disc (%)","Pool Hits Discovered (mean ± std)", None),
     ]:
         ax.bar(x, means, yerr=stds, capsize=4, color="steelblue", alpha=0.8,
                error_kw={"linewidth": 1.5})
@@ -794,13 +862,13 @@ def plot_batch_comparison(
     ax1.legend()
     ax1.grid(True, alpha=0.3)
 
-    # Top-k
+    # Hit discovery
     for hist, label in [(hist_cl, "Constant Liar"), (hist_kb, "Kriging Believer")]:
-        iters, fracs = metrics.top_percent_curve(hist)
+        iters, fracs = metrics.hit_discovery_curve(hist)
         ax2.plot(iters, fracs * 100, label=label, linewidth=2)
     ax2.set_xlabel("Evaluation")
-    ax2.set_ylabel(f"Top-{metrics.top_fraction*100:.0f}% Discovered (%)")
-    ax2.set_title("Batch BO Top-k Discovery")
+    ax2.set_ylabel(f"Pool Hits Discovered (y >= {metrics.hit_threshold:.0f}) [%]")
+    ax2.set_title("Batch BO Hit Discovery")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
@@ -848,12 +916,16 @@ def plot_per_cluster_bar(cluster_stats_by_seed, metric="AF",
                          save_path=None):
     """Grouped bar chart: per-cluster metric with error bars across seeds.
 
+    NaN values (clusters with no pool hits) are excluded from mean/std and the
+    bar is left blank with an "n/a" annotation, instead of being silently
+    counted as zero.
+
     Parameters
     ----------
     cluster_stats_by_seed : list[dict]
         Each element is the output of SimulationMetrics.per_cluster_summary(),
         one per seed.
-    metric : str — "AF", "EF", or "Top%"
+    metric : str — "AF", "EF", or "hit_discovery_rate"
     save_path : str or None
     """
     if save_path is None:
@@ -861,34 +933,53 @@ def plot_per_cluster_bar(cluster_stats_by_seed, metric="AF",
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     cluster_ids = sorted(cluster_stats_by_seed[0].keys())
-    means, stds = [], []
+    means, stds, na_flags = [], [], []
     for cid in cluster_ids:
         vals = [seed_stats[cid][metric] for seed_stats in cluster_stats_by_seed
                 if cid in seed_stats]
-        means.append(np.mean(vals) if vals else 0.0)
-        stds.append(np.std(vals) if vals else 0.0)
+        valid = [v for v in vals if v is not None and not np.isnan(v)]
+        if valid:
+            means.append(float(np.mean(valid)))
+            stds.append(float(np.std(valid)))
+            na_flags.append(False)
+        else:
+            means.append(0.0)
+            stds.append(0.0)
+            na_flags.append(True)
 
-    # Add aggregate bar
+    # Add aggregate bar (NaNs excluded)
     agg_vals = []
     for seed_stats in cluster_stats_by_seed:
-        all_vals = [seed_stats[cid][metric] for cid in cluster_ids if cid in seed_stats]
-        agg_vals.append(np.mean(all_vals) if all_vals else 0.0)
-    means.append(np.mean(agg_vals))
-    stds.append(np.std(agg_vals))
+        all_vals = [seed_stats[cid][metric] for cid in cluster_ids
+                    if cid in seed_stats]
+        valid = [v for v in all_vals if v is not None and not np.isnan(v)]
+        if valid:
+            agg_vals.append(float(np.mean(valid)))
+    means.append(float(np.mean(agg_vals)) if agg_vals else 0.0)
+    stds.append(float(np.std(agg_vals)) if agg_vals else 0.0)
+    na_flags.append(not bool(agg_vals))
 
     labels = [f"C{cid}" for cid in cluster_ids] + ["Agg"]
     x = np.arange(len(labels))
 
     fig, ax = plt.subplots(figsize=(12, 5))
     colors = ["steelblue"] * len(cluster_ids) + ["firebrick"]
-    ax.bar(x, means, yerr=stds, capsize=4, color=colors, edgecolor="black",
-           linewidth=0.5)
+    bars = ax.bar(x, means, yerr=stds, capsize=4, color=colors, edgecolor="black",
+                  linewidth=0.5)
+    for bar, na in zip(bars, na_flags):
+        if na:
+            ax.text(bar.get_x() + bar.get_width() / 2, 0.02,
+                    "n/a", ha="center", va="bottom", fontsize=8, color="gray")
+
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.set_ylabel(metric)
-    ax.set_title(f"Per-Cluster {metric} (mean ± std across seeds)")
-    if metric == "AF":
-        ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.8, label="Random (AF=1)")
+    title_metric = "AF" if metric == "AF" else "EF" if metric == "EF" else metric
+    ax.set_title(f"Per-Cluster {title_metric} (mean ± std across seeds)\n"
+                 f"NaN clusters (no pool hits) shown as n/a")
+    if metric in ("AF", "EF"):
+        ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.8,
+                   label=f"Random ({metric}=1)")
         ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
@@ -901,8 +992,8 @@ def plot_evaluate_hit_rate(cluster_stats_by_seed,
                            save_path="docs/bo_per_cluster_hit_rate.png"):
     """Grouped bar chart: BO hit rate vs random baseline, mean ± std across seeds.
 
-    Hit rate  = fraction of BO selections with score >= 7.
-    Baseline  = fraction of pool with score >= 7 (random guessing).
+    Hit rate  = fraction of BO selections with score >= BO_HIT_THRESHOLD.
+    Baseline  = fraction of pool with score >= BO_HIT_THRESHOLD (random guessing).
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
@@ -944,7 +1035,7 @@ def plot_evaluate_hit_rate(cluster_stats_by_seed,
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_ylabel("Hit Rate (%):  score ≥ 7")
+    ax.set_ylabel(f"Hit Rate (%):  score >= {BO_HIT_THRESHOLD:.0f}")
     ax.set_title("Per-Cluster BO Hit Rate vs Random Baseline (mean ± std across seeds)")
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
@@ -958,9 +1049,12 @@ def plot_evaluate_hit_rate(cluster_stats_by_seed,
 def plot_loco_bar(loco_results, metric="AF", save_path=None):
     """Bar chart of leave-one-cluster-out results.
 
+    NaN values (clusters with no pool hits) render as a blank bar with an
+    "n/a" annotation rather than a misleading zero.
+
     Parameters
     ----------
-    loco_results : dict {cluster_id: {"AF": ..., "EF": ..., "Top%": ..., "n_pool": ...}}
+    loco_results : dict {cluster_id: {"AF": ..., "EF": ..., "n_pool": ...}}
     metric : str
     save_path : str or None
     """
@@ -969,22 +1063,29 @@ def plot_loco_bar(loco_results, metric="AF", save_path=None):
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
     cluster_ids = sorted(loco_results.keys())
-    vals = [loco_results[cid][metric] for cid in cluster_ids]
+    raw_vals = [loco_results[cid].get(metric, float("nan")) for cid in cluster_ids]
+    na_flags = [v is None or (isinstance(v, float) and np.isnan(v)) for v in raw_vals]
+    plot_vals = [0.0 if na else v for v, na in zip(raw_vals, na_flags)]
     pool_sizes = [loco_results[cid].get("n_pool", 0) for cid in cluster_ids]
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    bars = ax.bar([f"C{c}" for c in cluster_ids], vals,
+    bars = ax.bar([f"C{c}" for c in cluster_ids], plot_vals,
                   color="steelblue", edgecolor="black", linewidth=0.5)
 
-    # Annotate pool size on each bar
-    for bar, ps in zip(bars, pool_sizes):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
-                f"n={ps}", ha="center", va="bottom", fontsize=8)
+    for bar, ps, na in zip(bars, pool_sizes, na_flags):
+        if na:
+            ax.text(bar.get_x() + bar.get_width() / 2, 0.02,
+                    f"n/a\nn={ps}", ha="center", va="bottom", fontsize=8,
+                    color="gray")
+        else:
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                    f"n={ps}", ha="center", va="bottom", fontsize=8)
 
     ax.set_ylabel(metric)
     ax.set_title(f"Leave-One-Cluster-Out: {metric} per held-out cluster")
-    if metric == "AF":
-        ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.8, label="Random (AF=1)")
+    if metric in ("AF", "EF"):
+        ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.8,
+                   label=f"Random ({metric}=1)")
         ax.legend()
     ax.grid(axis="y", alpha=0.3)
     fig.tight_layout()
@@ -1023,7 +1124,7 @@ def plot_loco_hit_rate(loco_results, save_path="docs/bo_loco_hit_rate.png"):
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
-    ax.set_ylabel("Hit Rate (%):  score ≥ 7")
+    ax.set_ylabel(f"Hit Rate (%):  score >= {BO_HIT_THRESHOLD:.0f}")
     ax.set_title("LOCO: BO Hit Rate vs Random Baseline per Cluster")
     ax.legend()
     ax.grid(axis="y", alpha=0.3)
@@ -1032,6 +1133,191 @@ def plot_loco_hit_rate(loco_results, save_path="docs/bo_loco_hit_rate.png"):
     fig.savefig(save_path, dpi=150)
     plt.close(fig)
     print(f"[bo_metrics] Saved LOCO hit rate → {save_path}")
+
+
+def plot_loco_bar_multiseed(loco_results_by_seed, metric="AF", save_path=None):
+    """LOCO bar chart with mean ± std error bars across seeds.
+
+    Same shape as plot_loco_bar but operates on a list of LOCO result dicts
+    (one per seed) and draws error bars for each held-out cluster. NaN values
+    (clusters with no pool hits) are excluded from the mean/std and rendered
+    as a blank bar with an "n/a" annotation.
+
+    Parameters
+    ----------
+    loco_results_by_seed : list[dict]
+        Each element is a {cluster_id: {metric: ..., n_pool: ...}} dict
+        produced by one LOCO run (one seed).
+    metric : str — "AF", "EF", or "hit_discovery_rate"
+    save_path : str or None
+    """
+    if not loco_results_by_seed:
+        print(f"[bo_metrics] plot_loco_bar_multiseed: empty input, skipping.")
+        return
+    if save_path is None:
+        save_path = f"docs/bo_loco_{metric.replace('%', 'pct')}_multiseed.png"
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    # Union of cluster ids across seeds (a cluster could be skipped in some
+    # seeds if it ever falls below the min-pool threshold; in practice the
+    # threshold is fixed, so this is just defensive).
+    all_cids = sorted({cid for r in loco_results_by_seed for cid in r.keys()})
+
+    means, stds, na_flags, pool_sizes = [], [], [], []
+    for cid in all_cids:
+        vals = [r[cid].get(metric, float("nan"))
+                for r in loco_results_by_seed if cid in r]
+        valid = [v for v in vals if v is not None and not np.isnan(v)]
+        if valid:
+            means.append(float(np.mean(valid)))
+            stds.append(float(np.std(valid)))
+            na_flags.append(False)
+        else:
+            means.append(0.0)
+            stds.append(0.0)
+            na_flags.append(True)
+        # Pool size is invariant across seeds; take the first one we see.
+        ps = next((r[cid].get("n_pool", 0)
+                   for r in loco_results_by_seed if cid in r), 0)
+        pool_sizes.append(ps)
+
+    # Pool-size weighted aggregate per seed, then mean ± std across seeds.
+    agg_per_seed = []
+    for r in loco_results_by_seed:
+        pairs = [(r[c][metric], r[c].get("n_pool", 0)) for c in r
+                 if metric in r[c]
+                 and not (isinstance(r[c][metric], float)
+                          and np.isnan(r[c][metric]))]
+        if not pairs:
+            continue
+        total_w = sum(w for _, w in pairs)
+        if total_w <= 0:
+            continue
+        agg_per_seed.append(sum(v * w for v, w in pairs) / total_w)
+    if agg_per_seed:
+        means.append(float(np.mean(agg_per_seed)))
+        stds.append(float(np.std(agg_per_seed)))
+        na_flags.append(False)
+    else:
+        means.append(0.0)
+        stds.append(0.0)
+        na_flags.append(True)
+    pool_sizes.append(sum(pool_sizes))
+
+    labels = [f"C{cid}" for cid in all_cids] + ["W.Mean"]
+    x = np.arange(len(labels))
+    colors = ["steelblue"] * len(all_cids) + ["firebrick"]
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    bars = ax.bar(x, means, yerr=stds, capsize=4, color=colors,
+                  edgecolor="black", linewidth=0.5)
+
+    for bar, ps, na, m, s in zip(bars, pool_sizes, na_flags, means, stds):
+        if na:
+            ax.text(bar.get_x() + bar.get_width() / 2, 0.02,
+                    f"n/a\nn={ps}", ha="center", va="bottom", fontsize=8,
+                    color="gray")
+        else:
+            ax.text(bar.get_x() + bar.get_width() / 2, m + s + 0.02,
+                    f"n={ps}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel(metric)
+    n_seeds = len(loco_results_by_seed)
+    ax.set_title(f"LOCO {metric} per held-out cluster "
+                 f"(mean ± std across {n_seeds} seeds)")
+    if metric in ("AF", "EF"):
+        ax.axhline(1.0, color="gray", linestyle="--", linewidth=0.8,
+                   label=f"Random ({metric}=1)")
+        ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"[bo_metrics] Saved LOCO {metric} (multi-seed) → {save_path}")
+
+
+def plot_loco_hit_rate_multiseed(loco_results_by_seed,
+                                 save_path="docs/bo_loco_hit_rate_multiseed.png"):
+    """LOCO BO hit-rate vs random baseline with error bars across seeds.
+
+    Shows a grouped bar chart: BO hit rate (mean ± std across seeds) vs the
+    cluster's random baseline (deterministic per cluster, so no error bar).
+    """
+    if not loco_results_by_seed:
+        print(f"[bo_metrics] plot_loco_hit_rate_multiseed: empty input, skipping.")
+        return
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+
+    all_cids = sorted({cid for r in loco_results_by_seed for cid in r.keys()})
+
+    hit_means, hit_stds, base_vals, pool_sizes = [], [], [], []
+    for cid in all_cids:
+        hits = [r[cid]["hit_rate"] for r in loco_results_by_seed if cid in r]
+        bases = [r[cid]["baseline_hit"] for r in loco_results_by_seed if cid in r]
+        hit_means.append(np.mean(hits) * 100 if hits else 0.0)
+        hit_stds.append(np.std(hits) * 100 if hits else 0.0)
+        # Baseline is deterministic per cluster; same across seeds.
+        base_vals.append(np.mean(bases) * 100 if bases else 0.0)
+        ps = next((r[cid].get("n_pool", 0)
+                   for r in loco_results_by_seed if cid in r), 0)
+        pool_sizes.append(ps)
+
+    # Pool-size weighted aggregate over clusters, per seed → mean ± std.
+    agg_hits, agg_bases = [], []
+    for r in loco_results_by_seed:
+        pairs = [(r[c]["hit_rate"], r[c].get("n_pool", 0)) for c in r]
+        bpairs = [(r[c]["baseline_hit"], r[c].get("n_pool", 0)) for c in r]
+        total = sum(w for _, w in pairs)
+        if total <= 0:
+            continue
+        agg_hits.append(sum(v * w for v, w in pairs) / total * 100)
+        agg_bases.append(sum(v * w for v, w in bpairs) / total * 100)
+    if agg_hits:
+        hit_means.append(float(np.mean(agg_hits)))
+        hit_stds.append(float(np.std(agg_hits)))
+        base_vals.append(float(np.mean(agg_bases)))
+    else:
+        hit_means.append(0.0)
+        hit_stds.append(0.0)
+        base_vals.append(0.0)
+    pool_sizes.append(sum(pool_sizes))
+
+    labels = [f"C{cid}" for cid in all_cids] + ["W.Mean"]
+    x = np.arange(len(labels))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    colors_bo = ["steelblue"] * len(all_cids) + ["firebrick"]
+    colors_base = ["lightcoral"] * len(all_cids) + ["salmon"]
+
+    ax.bar(x - width / 2, hit_means, width, yerr=hit_stds, capsize=4,
+           color=colors_bo, edgecolor="black", linewidth=0.5,
+           label="BO hit rate (mean ± std)")
+    ax.bar(x + width / 2, base_vals, width,
+           color=colors_base, edgecolor="black", linewidth=0.5,
+           label="Random baseline")
+
+    for i, ps in enumerate(pool_sizes):
+        y_top = max(hit_means[i] + hit_stds[i], base_vals[i])
+        ax.text(x[i], y_top + 1.5, f"n={ps}", ha="center", va="bottom",
+                fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel(f"Hit Rate (%):  score >= {BO_HIT_THRESHOLD:.0f}")
+    n_seeds = len(loco_results_by_seed)
+    ax.set_title(f"LOCO BO Hit Rate vs Random Baseline "
+                 f"(mean ± std across {n_seeds} seeds)")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.3)
+    ax.set_ylim(0, max(max(h + s for h, s in zip(hit_means, hit_stds)),
+                       max(base_vals, default=0)) + 10)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    print(f"[bo_metrics] Saved LOCO hit rate (multi-seed) → {save_path}")
 
 
 def plot_learning_curve(lc_results, save_path="docs/bo_learning_curve.png"):
@@ -1054,7 +1340,8 @@ def plot_learning_curve(lc_results, save_path="docs/bo_learning_curve.png"):
     for ax, metric, ylabel in zip(
         axes,
         ["AF", "EF", "hit"],
-        ["Acceleration Factor", "Enhancement Factor", "Hit Rate (score ≥ 7)"],
+        ["Acceleration Factor", "Enrichment Factor",
+         f"Hit Rate (score >= {BO_HIT_THRESHOLD:.0f})"],
     ):
         means = [r[f"{metric}_mean"] for r in lc_results]
         stds  = [r[f"{metric}_std"]  for r in lc_results]

@@ -1,3 +1,9 @@
+# Core scientific stack.
+# NOTE: install via ./install.sh, not `pip install -r requirements.txt` alone —
+# mordred must be installed with --no-deps (it pins an old numpy), and torch
+# comes from the PyTorch index. install.sh handles the ordering.
+numpy==2.0.2
+pandas==2.2.2
 openpyxl
 rdkit==2025.9.6
 scipy==1.17.0
@@ -19,3 +25,10 @@ transformers
 shap
 matplotlib
 xgboost==3.2.0
+
+# Installed separately by install.sh (see notes above):
+#   mordred==1.2.0 (--no-deps)
+#   torch==2.10.0 (PyTorch wheel index; CPU build used in Docker)
+
+# Web app (app/) only:
+#   streamlit, filelock (installed in Dockerfile)

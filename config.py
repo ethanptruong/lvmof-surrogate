@@ -67,21 +67,26 @@ PROCESS_COLS = [
     'solvent_1_fraction',
     'solvent_2_fraction',
     'solvent_3_fraction',
-    'Min_Boiling_Point_K',
-    'Max_Boiling_Point_K',
-    'Weighted_Boiling_Point_K',
-    'Weighted_AN_mole',
-    'Weighted_DN_mole',
-    'Weighted_Dielectric_vol',
-    'Weighted_Polarity_vol',
-    'Weighted_sig_h_vol',
-    'Weighted_sig_d_vol',
-    'Weighted_sig_p_vol',
+    # Legacy hand-crafted solvent descriptors (Min/Max/Weighted boiling point,
+    # Gutmann AN/DN, dielectric, polarity, Hansen sig_h/d/p) were removed in
+    # favor of the COSMO-RS Mix_* block below, which encodes the same physics
+    # directly from VT-2005 sigma profiles (no NaNs on newly-recorded rows).
+    # COSMO-RS mixture descriptors — populated by cosmo_features.enrich_with_cosmo_features
+    # (mole-fraction-weighted sigma moments + HB + surface fractions from VT-2005 profiles).
+    # Must stay in sync with cosmo_features.COSMO_COLS.
     'Mix_M0_Area',
+    'Mix_M1_NetCharge',
     'Mix_M2_Polarity',
     'Mix_M3_Asymmetry',
+    'Mix_M4_Kurtosis',
     'Mix_M_HB_Acc',
     'Mix_M_HB_Don',
+    'Mix_f_nonpolar',
+    'Mix_f_acc',
+    'Mix_f_don',
+    'Mix_sigma_std',
+    'Mix_Vcosmo',
+    'Mix_lnPvap',
     'temperature_k',
     'metal_over_linker_ratio',
     'reaction_hours',
@@ -361,8 +366,16 @@ _COORD_KEYS = ["COOH", "COO_neg", "py_N", "amine_prim",
                "phosphonate", "sulfonate"]
 
 # ── Bayesian Optimization ────────────────────────────────────────────────────
-BO_DEFAULT_ACQUISITION = "lfbo"
-BO_LFBO_GAMMA          = 0.25
+# Single source of truth for the scientific success criterion: a "hit" is a
+# pxrd_score >= BO_HIT_THRESHOLD (crystalline product). Used by AF / EF / Hit%
+# metrics, the LFBO acquisition, the gamma sweep, and tail-reweighted training.
+BO_HIT_THRESHOLD       = 7.0
+BO_DEFAULT_ACQUISITION = "lfbo_ssl"
+# LFBO gamma = top-quantile of observed y treated as the positive class.
+# Aligned with the empirical hit base rate (~10-15% of rows at y >= 7), so the
+# classifier's decision boundary tracks the actual hit threshold rather than
+# an arbitrary top-quartile.
+BO_LFBO_GAMMA          = 0.15
 BO_EI_XI               = 0.01
 BO_N_ITERATIONS        = 50
 BO_BATCH_SIZE          = 3
@@ -372,23 +385,38 @@ BO_EPSILON_GREEDY      = 0.1
 BO_N_LHS_SAMPLES       = 1000
 BO_DEFAULT_SURROGATE   = "rf_cl_mi"
 BO_BOOTSTRAP_M         = 50
-BO_LFBO_ADAPTIVE_GAMMA = True   # anneal gamma from BO_LFBO_GAMMA → 0.10 over the campaign
+BO_LFBO_ADAPTIVE_GAMMA = False  # fixed gamma; retrospective sweep showed annealing to 0.10 hurts hit@k
 BO_CLUSTER_DIV_LAMBDA  = 2.0    # strength of chemistry-cluster diversity penalty (simulation only)
                                  # 0 = disabled; higher = stronger push toward unexplored clusters
 
+# LFBO-SSL: surrogate-pseudo-labelled extension of LFBO-EI.  Augments the
+# classifier's training set with regression-surrogate predictions on the
+# unevaluated pool.  Defensible default: pseudo_weight=0.3 keeps observed
+# labels dominant; sweep {0.1, 0.3, 0.5, 1.0} when reporting headline results.
+BO_LFBO_SSL_PSEUDO_WEIGHT = 0.3
+BO_LFBO_SSL_USE_SIGMA     = True   # downweight high-sigma (uncertain) pseudo-labels
+
+# Tail-reweighted regression: inverse-frequency sample weights on rare high-y rows.
+# Redirects surrogate capacity to the 7–9 region BO actually cares about instead of
+# letting the 0–3 mass dominate MSE. Disabled automatically for RankingRegressionSurrogate.
+BO_TAIL_WEIGHT_ENABLED   = True
+BO_TAIL_WEIGHT_THRESHOLD = BO_HIT_THRESHOLD   # mirror the unified hit threshold
+BO_TAIL_WEIGHT_ALPHA     = 0.5   # 0 = off, 1 = full inverse-frequency, 2 = aggressive
+BO_TAIL_WEIGHT_MIN_FREQ  = 1e-3  # floor on frequency to avoid huge weights when tail is nearly empty
+
 # Controllable process parameters for BO
-# (total_conc bounds computed at runtime from 5th-95th percentile of training data)
+# (linker_conc bounds computed at runtime from 5th-95th percentile of training data)
 BO_CONTROLLABLE_PARAMS = {
     "equivalents":           (0.0, 150.0),
     "temperature_k":         (298.0, 393.0),
-    "total_conc":            None,   # computed at runtime via percentile clipping
+    "linker_conc":           None,   # computed at runtime via percentile clipping
     "phi_1":                 (0.0, 1.0),   # solvent_1 volume fraction
 }
 # Optional param, off by default — enable via --bo-include-mlr
 BO_OPTIONAL_PARAMS = {
     "metal_over_linker_ratio": (0.0, 4.0),
 }
-BO_TOTAL_CONC_CLIP_PERCENTILES = (5, 95)
-BO_LOG_SCALE_PARAMS            = ["total_conc"]
+BO_LINKER_CONC_CLIP_PERCENTILES = (5, 95)
+BO_LOG_SCALE_PARAMS             = ["linker_conc"]
 TOTAL_VOLUME_ML = 2.0   # fixed synthesis volume for BO candidate featurization
 BO_LINKER_UMOL_BOUNDS = (10.0, 25.0)  # hard constraint on linker µmol per synthesis

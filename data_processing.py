@@ -166,6 +166,36 @@ def load_data(file_path: str) -> pd.DataFrame:
     return df
 
 
+def add_solvent_cosmo_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Populate COSMO-RS mixture descriptors (Mix_*) for each experiment by
+    weighting per-solvent VT-2005 sigma profiles with the recorded
+    solvent_1/2/3 proportions.
+
+    Rows that already have Mix_M0_Area filled are preserved as-is
+    (overwrite=False); only rows missing the mixture features are
+    (re)computed.  This keeps the pipeline idempotent on pre-enriched
+    datasets while still handling newly-appended experiments.
+
+    Delegates to cosmo_features.enrich_with_cosmo_features, which is the
+    single source of truth for the mixture calculation.
+    """
+    from cosmo_features import enrich_with_cosmo_features, COSMO_COLS
+
+    needs_compute = True
+    if all(c in df.columns for c in COSMO_COLS):
+        # If every row already has Mix_M0_Area we can skip the work entirely.
+        if df["Mix_M0_Area"].notna().all():
+            print("[COSMO] All rows already enriched — skipping recomputation.")
+            return df
+        n_missing = int(df["Mix_M0_Area"].isna().sum())
+        print(f"[COSMO] {n_missing}/{len(df)} rows missing Mix_* — enriching...")
+    else:
+        print(f"[COSMO] Mix_* columns absent — computing from solvent proportions...")
+
+    return enrich_with_cosmo_features(df, overwrite=False)
+
+
 # ── Missing value handling ─────────────────────────────────────────────────────
 
 # Structural absence: no second/third solvent was used → 0 is the correct value.
@@ -299,15 +329,9 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
     NaN counts, coercion failures, temperature sanity checks, and per-experiment
     breakdown of missing values.
     """
-    process_cols = [
-        'equivalents', 'total_solvent_volume_ml', 'solvent_1_fraction',
-        'solvent_2_fraction', 'solvent_3_fraction', 'Min_Boiling_Point_K',
-        'Max_Boiling_Point_K', 'Weighted_Boiling_Point_K', 'Weighted_AN_mole',
-        'Weighted_DN_mole', 'Weighted_Dielectric_vol', 'Weighted_Polarity_vol',
-        'Weighted_sig_h_vol', 'Weighted_sig_d_vol', 'Weighted_sig_p_vol',
-        'Mix_M0_Area', 'Mix_M2_Polarity', 'Mix_M3_Asymmetry', 'Mix_M_HB_Acc',
-        'Mix_M_HB_Don', 'temperature_k', 'metal_over_linker_ratio', 'reaction_hours'
-    ]
+    # Read the canonical list from config so the audit stays in sync with
+    # feature_assembly.assemble_features (which also uses PROCESS_COLS).
+    from config import PROCESS_COLS as process_cols
 
     process_cols_present = [c for c in process_cols if c in df_merged.columns]
     process_df = df_merged[process_cols_present].apply(pd.to_numeric, errors='coerce')
@@ -325,7 +349,7 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
             pct = 100 * n / len(process_df)
             print(f"  {col:<35} {n:>4} NaNs  ({pct:.1f}%)")
     if total_nan == 0:
-        print("  ✅ No NaNs found — issue is NOT missing values from the source file.")
+        print("  No NaNs found — issue is NOT missing values from the source file.")
 
     # ── 2. Coercion failures — values that became NaN after to_numeric ─────────────
     print()

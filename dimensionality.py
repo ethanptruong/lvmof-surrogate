@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import umap
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, MinMaxScaler
 from sklearn.feature_selection import (VarianceThreshold, SelectKBest,
@@ -105,12 +106,14 @@ def remap_score(s) -> int:
 # ─────────────────────────────────────────────────────────────
 def apply_variance_threshold(X) -> tuple:
     """
-    Prepend KMeans OHE features then apply VarianceThreshold(0.0).
+    Fit StandardScaler + KMeans + OHE + VarianceThreshold on X.
 
     Returns
     -------
-    X_vt   : np.ndarray  post-VT features (includes cluster OHE)
-    vt_pre : fitted VarianceThreshold transformer
+    X_vt    : np.ndarray  post-VT features (includes cluster OHE)
+    vt_pre  : fitted VarianceThreshold transformer (for backward compat)
+    fitted  : dict with keys {scaler, kmeans, ohe, vt} — persist these to reuse
+              at inference time (e.g. BO target-chemistry re-featurization).
     """
     print(f"[KMeans] Scaling X ({X.shape}) before clustering…")
     _scaler_km = StandardScaler()
@@ -123,16 +126,154 @@ def apply_variance_threshold(X) -> tuple:
     _ohe_km = OneHotEncoder(sparse_output=False, dtype=float)
     _cluster_ohe = _ohe_km.fit_transform(cluster_labels_raw.reshape(-1, 1))
 
-    X = np.hstack([X, _cluster_ohe])
-    print(f"[KMeans] X shape after appending cluster OHE features: {X.shape}")
+    X_aug = np.hstack([X, _cluster_ohe])
+    print(f"[KMeans] X shape after appending cluster OHE features: {X_aug.shape}")
     print(f"[KMeans] Cluster distribution: "
           f"{ {int(k): int(v) for k, v in zip(*np.unique(cluster_labels_raw, return_counts=True))} }")
 
     vt_pre = VarianceThreshold(threshold=0.0)
-    X_vt = vt_pre.fit_transform(X)
+    X_vt = vt_pre.fit_transform(X_aug)
     print(f"After VarianceThreshold: {X_vt.shape}")
 
-    return X_vt, vt_pre
+    fitted = {
+        "scaler": _scaler_km,
+        "kmeans": _km_pre,
+        "ohe":    _ohe_km,
+        "vt":     vt_pre,
+    }
+    return X_vt, vt_pre, fitted
+
+
+def transform_variance_threshold(X, fitted) -> np.ndarray:
+    """
+    Transform-only counterpart to apply_variance_threshold: uses pre-fitted
+    transformers from a prior training run. Used at BO inference time to
+    project a freshly-featurized target-chemistry row into the same post-VT
+    feature space the surrogate was trained on.
+
+    Parameters
+    ----------
+    X      : np.ndarray  shape (n, n_raw_features) — same column order as
+             training X_final (pre-cluster-OHE, pre-VT).
+    fitted : dict with keys {scaler, kmeans, ohe, vt} from apply_variance_threshold.
+
+    Returns
+    -------
+    X_vt : np.ndarray  shape (n, n_post_vt_features) aligned with training X_vt.
+    """
+    X_scaled    = fitted["scaler"].transform(X)
+    labels      = fitted["kmeans"].predict(X_scaled)
+    cluster_ohe = fitted["ohe"].transform(labels.reshape(-1, 1))
+    X_aug       = np.hstack([X, cluster_ohe])
+    X_vt        = fitted["vt"].transform(X_aug)
+    return X_vt
+
+
+# ─────────────────────────────────────────────────────────────
+# Leakage-free variants for fold-local KMeans pipelines
+# ─────────────────────────────────────────────────────────────
+def apply_variance_threshold_no_kmeans(X) -> tuple:
+    """VT-only sibling of apply_variance_threshold.
+
+    Use when KMeans cluster-OHE is added *inside* a CV pipeline (fold-local
+    fit via KMeansFeatureAugmenter) instead of pre-pended to X. This avoids
+    the X-distribution leakage of fitting KMeans on the entire dataset.
+
+    Returns
+    -------
+    X_vt : np.ndarray  post-VT features (chemistry only, no cluster OHE)
+    fitted : dict {"vt": fitted VarianceThreshold}
+        Returned as a dict so callers can swap with apply_variance_threshold's
+        return shape; pass to transform_variance_threshold_no_kmeans for new
+        rows at inference time.
+    """
+    print(f"[VT-noKM] Fitting VarianceThreshold on X ({X.shape}) — "
+          f"no KMeans, fold-local clustering deferred to pipeline.")
+    vt = VarianceThreshold(threshold=0.0)
+    X_vt = vt.fit_transform(X)
+    print(f"[VT-noKM] After VarianceThreshold: {X_vt.shape}  "
+          f"(cluster-OHE will be added per-fold inside the surrogate pipeline)")
+    return X_vt, {"vt": vt}
+
+
+def transform_variance_threshold_no_kmeans(X, fitted) -> np.ndarray:
+    """Transform-only sibling of transform_variance_threshold for the
+    no-KMeans pipeline. Just applies VT — cluster OHE is added by the
+    in-pipeline KMeansFeatureAugmenter at predict time."""
+    return fitted["vt"].transform(X)
+
+
+class KMeansFeatureAugmenter(BaseEstimator, TransformerMixin):
+    """Fold-local KMeans cluster-OHE feature augmenter (sklearn transformer).
+
+    Drop-in replacement for the leaky pre-CV KMeans step in
+    apply_variance_threshold. Fits StandardScaler + KMeans on the first
+    ``n_chem_features`` columns of X (chemistry features only — process
+    variables and engineered interactions are excluded from the clustering),
+    one-hot-encodes the cluster label, and appends the OHE columns to X.
+
+    Place as the first non-impute step of an sklearn/imblearn pipeline so
+    KMeans refits per CV fold and the cluster IDs assigned to validation
+    rows are not informed by their own X coordinates — eliminating the
+    X-distribution leakage that otherwise affects per-cluster / LOCO scores.
+
+    Parameters
+    ----------
+    n_clusters : int — number of KMeans clusters (default: config.N_CLUSTERS)
+    n_chem_features : int or None
+        Number of leading columns of X that constitute chemistry features.
+        If None, all columns are clustered. In the standard X_cv layout
+        (X_vt | Xprocnorm | interactions), set this to ``X_vt.shape[1]``
+        so process variables don't influence cluster centroids.
+    random_state : int — KMeans random state.
+
+    Attributes (set after fit)
+    --------------------------
+    n_chem_in_ : int — chemistry-feature width seen during fit
+    scaler_, kmeans_, ohe_ : fitted sub-transformers
+    """
+
+    def __init__(self, n_clusters=N_CLUSTERS, n_chem_features=None,
+                 random_state=RANDOM_STATE):
+        self.n_clusters = n_clusters
+        self.n_chem_features = n_chem_features
+        self.random_state = random_state
+
+    def fit(self, X, y=None):
+        X = np.asarray(X, dtype=float)
+        n_chem = (self.n_chem_features
+                  if self.n_chem_features is not None
+                  else X.shape[1])
+        if n_chem > X.shape[1]:
+            raise ValueError(
+                f"KMeansFeatureAugmenter: n_chem_features={n_chem} exceeds "
+                f"X.shape[1]={X.shape[1]}. Did you pass the right slice?"
+            )
+        self.n_chem_in_ = n_chem
+        X_chem = np.nan_to_num(X[:, :n_chem],
+                               nan=0.0, posinf=0.0, neginf=0.0)
+
+        self.scaler_ = StandardScaler().fit(X_chem)
+        Xs = self.scaler_.transform(X_chem)
+        self.kmeans_ = KMeans(
+            n_clusters=self.n_clusters,
+            random_state=self.random_state,
+            n_init=10,
+        ).fit(Xs)
+        labels = self.kmeans_.predict(Xs)
+        self.ohe_ = OneHotEncoder(
+            sparse_output=False, dtype=float, handle_unknown="ignore"
+        ).fit(labels.reshape(-1, 1))
+        return self
+
+    def transform(self, X):
+        X = np.asarray(X, dtype=float)
+        X_chem = np.nan_to_num(X[:, :self.n_chem_in_],
+                               nan=0.0, posinf=0.0, neginf=0.0)
+        Xs = self.scaler_.transform(X_chem)
+        labels = self.kmeans_.predict(Xs)
+        ohe = self.ohe_.transform(labels.reshape(-1, 1))
+        return np.hstack([X, ohe])
 
 
 # ─────────────────────────────────────────────────────────────

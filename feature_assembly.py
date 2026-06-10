@@ -6,6 +6,15 @@ for the LVMOF-Surrogate pipeline.
 import numpy as np
 import pandas as pd
 from drfp import DrfpEncoder
+
+# drfp 0.2.6 + NumPy 1.24+ bug: DrfpEncoder.hash casts blake2b 32-bit hashes
+# (range [0, 2**32)) into np.int32, which overflows. Reinterpret bits via
+# uint32.view(int32) so high hashes wrap to negative without raising.
+def _drfp_hash_patched(shingling):
+    from hashlib import blake2b
+    vals = [int(blake2b(t, digest_size=4).hexdigest(), 16) for t in shingling]
+    return np.array(vals, dtype=np.uint32).view(np.int32)
+DrfpEncoder.hash = staticmethod(_drfp_hash_patched)
 from featurization import (
     get_metal_descriptors, get_precursor_geometry,
     get_physicochem_10, get_tepid_value,
@@ -1162,11 +1171,18 @@ def build_feature_catalog(
     X_drfp,
     X_soap_precursor, X_soap_linker, soap_names,
     vt_mask,
+    kmeans_prepended_to_vt: bool = True,
 ):
     """Build feature name and group arrays for the full X_cv matrix.
 
     Parameters correspond to the arrays produced during assemble_features()
     and the subsequent dimensionality reduction steps.
+
+    ``kmeans_prepended_to_vt`` must mirror how vt was fit: True for the
+    legacy ``apply_variance_threshold`` path (KMeans OHE pre-pended before
+    VT), False for the leakage-free ``apply_variance_threshold_no_kmeans``
+    path (KMeans is fold-local inside the pipeline, so vt_mask covers
+    chemistry features only and X_cv carries no cluster OHE columns).
 
     Returns
     -------
@@ -1289,15 +1305,19 @@ def build_feature_catalog(
     _push([f'soap_precursor_{i}' for i in range(n_soap_prec)], "3D SOAP (Precursor)")
     _push([f'soap_linker_{i}' for i in range(n_soap_link)], "3D SOAP (Linker)")
 
-    # ── KMeans cluster OHE (appended by apply_variance_threshold) ──
-    _push([f'kmeans_cluster_{i}' for i in range(n_clusters)], "KMeans Cluster OHE")
+    # ── KMeans cluster OHE (only if pre-pended to VT input by
+    #    apply_variance_threshold; the leakage-free path adds them
+    #    fold-locally inside the pipeline so they are NOT in vt_mask). ──
+    if kmeans_prepended_to_vt:
+        _push([f'kmeans_cluster_{i}' for i in range(n_clusters)],
+              "KMeans Cluster OHE")
 
-    # Sanity check vs X_final + cluster OHE
-    n_xfinal_plus_ohe = X_final.shape[1] + n_clusters
-    if len(names) != n_xfinal_plus_ohe:
+    # Sanity check vs VT-input width
+    n_vt_input = X_final.shape[1] + (n_clusters if kmeans_prepended_to_vt else 0)
+    if len(names) != n_vt_input:
         print(f"[WARN] Feature catalog has {len(names)} names but "
-              f"X_final+OHE has {n_xfinal_plus_ohe} columns. "
-              f"Delta = {len(names) - n_xfinal_plus_ohe}")
+              f"VT input has {n_vt_input} columns. "
+              f"Delta = {len(names) - n_vt_input}")
 
     # ── Apply VT mask ──
     names_arr = np.array(names, dtype=object)
@@ -1333,6 +1353,7 @@ def build_discrete_mask(
     X_drfp,
     X_soap_precursor, X_soap_linker, soap_names,
     vt_mask,
+    kmeans_prepended_to_vt: bool = True,
 ):
     """Build a boolean mask: True = discrete/binary, False = continuous.
 
@@ -1340,6 +1361,8 @@ def build_discrete_mask(
     in the mask corresponds to the same column as index i in the name array.
     After construction the VT mask is applied, then process-variable and
     interaction columns are appended (all continuous except the high-temp flag).
+    ``kmeans_prepended_to_vt`` must match the value passed to
+    build_feature_catalog (see that function's docstring).
 
     Returns
     -------
@@ -1445,8 +1468,9 @@ def build_discrete_mask(
     _c(X_soap_precursor.shape[1])
     _c(X_soap_linker.shape[1])
 
-    # ── KMeans cluster OHE — discrete ──
-    _d(n_clusters)
+    # ── KMeans cluster OHE — discrete (only if pre-pended to VT input) ──
+    if kmeans_prepended_to_vt:
+        _d(n_clusters)
 
     # Concatenate all parts
     full_mask = np.concatenate(mask_parts)

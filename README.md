@@ -1,10 +1,10 @@
 # LVMOF-Surrogate: A Machine Learning Pipeline for Low-Valent MOF Synthesis Prediction
 
-A machine learning surrogate model for predicting the crystallinity outcome of Low-Valent Metal-Organic Framework (LVMOF) synthesis experiments, built to guide Bayesian Optimization toward novel, high-crystallinity MOF conditions. The pipeline trains ordinal classifiers on ~750 historically-run lab experiments, combining molecular fingerprints, physicochemical descriptors, and process variables, then uses cross-validated feature selection and hyperparameter tuning to rank candidate synthesis conditions for experimental prioritization. The surrogate model performs very well and is particularly effective at ranking the more crystalline candidates, enabling reliable prioritization of high-crystallinity synthesis conditions for Bayesian Optimization.
+A machine learning surrogate model for predicting the crystallinity outcome of Low-Valent Metal-Organic Framework (LVMOF) synthesis experiments, built to guide Bayesian Optimization toward novel, high-crystallinity MOF conditions. The pipeline trains ordinal classifiers on ~750 historically-run lab experiments, combining molecular fingerprints, physicochemical descriptors, and process variables, then uses cross-validated feature selection and hyperparameter tuning to rank candidate synthesis conditions for experimental prioritization. While absolute three-class accuracy is moderate (cross-validated QWK ≈ 0.2–0.4, reflecting the small dataset and label noise), the surrogate ranks crystalline candidates above amorphous ones reliably enough to drive Bayesian Optimization, which requires only correct ranking, not exact prediction.
 
 ---
 
-## Biological / Chemical Problem and Motivation
+## Chemical Problem and Motivation
 
 Metal-Organic Frameworks (MOFs) are porous crystalline materials with applications in gas storage, drug delivery, catalysis, and chemical sensing. **Low-valent MOFs (LVMOFs)** — built from electron-rich, low-oxidation-state metal centers (e.g., Pd(0), Rh(I), Ir(I)) — represent a particularly challenging and underexplored class. Their synthesis is notoriously difficult to reproduce: slight changes in solvent ratio, temperature, ligand sterics, or metal-to-linker stoichiometry can shift the product from fully crystalline to completely amorphous.
 
@@ -29,13 +29,10 @@ Historically, the Cohen Lab at UCSD has run hundreds of LVMOF synthesis experime
 | `total_solvent_volume_ml` | Total solvent volume |
 | `solvent_1/2/3_fraction` | Volume fractions of each solvent component |
 | `metal_conc`, `linker_conc`, `mod_conc`, `total_conc` | Component concentrations |
-| `Min/Max/Weighted_Boiling_Point_K` | Solvent boiling point statistics |
-| `Weighted_AN_mole`, `Weighted_DN_mole` | Solvent acceptor/donor number (Gutmann) |
-| `Weighted_Dielectric_vol` | Mixture dielectric constant |
-| `Weighted_Polarity_vol` | Mixture polarity index |
-| `Weighted_sig_h/d/p_vol` | Hansen solubility parameters (H-bond, dispersion, polar) |
-| `Mix_M0_Area`, `Mix_M2_Polarity`, `Mix_M3_Asymmetry` | COSMO-RS sigma-profile moments |
+| `Mix_M0_Area`, `Mix_M1_NetCharge`, `Mix_M2_Polarity`, `Mix_M3_Asymmetry`, `Mix_M4_Kurtosis` | COSMO-RS sigma-profile moments of the solvent mixture |
 | `Mix_M_HB_Acc`, `Mix_M_HB_Don` | Mixture H-bond acceptor/donor capacity |
+| `Mix_f_nonpolar`, `Mix_f_acc`, `Mix_f_don`, `Mix_sigma_std` | COSMO surface fractions and σ-profile spread |
+| `Mix_Vcosmo`, `Mix_lnPvap` | Mixture molecular volume and log vapor pressure |
 | `reaction_hours_missing`, `temperature_k_missing` | Missingness indicator flags |
 
 The dataset includes **both positive (crystalline) and negative (amorphous) outcomes**, which is crucial for building a discriminative model. Class imbalance is addressed with SMOTE oversampling during training.
@@ -115,7 +112,7 @@ Six pipeline variants are trained and compared:
 - [x] ROC / PRC curves per class, learning curves, normalized confusion matrices
 - [x] SHAP feature importance analysis (bar, beeswarm, grouped by descriptor block)
 - [x] Checkpoint system (data.pkl, best_params.pkl, optuna.db) for resumable runs
-- [ ] Bayesian Optimization active loop (framework scaffolded; experimental loop pending)
+- [x] Bayesian Optimization loop: LFBO-EI / LFBO-SSL / EI / Thompson Sampling acquisitions, pool-based retrospective simulation, multi-seed evaluation, leave-one-cluster-out (LOCO) validation, surrogate calibration checks, and recommendation mode for new experiments
 
 ---
 
@@ -123,7 +120,7 @@ Six pipeline variants are trained and compared:
 
 ### Model Comparison
 
-The **RF | MI only** pipeline achieved the best balance of predictive performance and generalization, with the smallest gap between training and validation QWK, indicating minimal overfitting relative to the other variants. The surrogate model works very well overall and is particularly effective at ranking the more crystalline candidates — consistently identifying and prioritizing high-crystallinity conditions with strong reliability. Contrastive learning augmentation did not consistently improve performance on this dataset size (~750 experiments), likely because the triplet encoder requires more data to learn a generalizable embedding.
+The RF | MI + CL pipeline achieved the best balance of predictive performance and generalization, with the smallest gap between training and validation QWK, indicating minimal overfitting relative to the other variants. The surrogate is most effective at the ranking task that matters for BO — placing more crystalline candidates above less crystalline ones (see ROC/PRC and top-k precision results below). Contrastive learning augmentation did not consistently improve performance on this dataset size (~750 experiments), likely because the triplet encoder requires more data to learn a generalizable embedding.
 
 ### Learning Curves
 
@@ -136,6 +133,12 @@ Learning curves show training vs. cross-validated QWK as a function of training 
 ROC and PRC curves are shown for all six pipeline variants for the Crystalline class (positive class = 2, prevalence ≈ 22.6%). The RF | MI only pipeline maintains competitive ROC-AUC and average precision relative to more complex variants.
 
 ![plot](./roc_prc_comparison.png)
+
+### Top-k Precision
+
+Top-k precision measures the fraction of true Crystalline outcomes among the k validation samples ranked highest by predicted crystallinity — the quantity that directly determines BO usefulness, since the optimizer only acts on the top of the ranking.
+
+![](top_k_precision.png)
 
 ### Normalized Confusion Matrices
 
@@ -167,7 +170,7 @@ The RF | MI only model identifies temperature, metal concentration, solvent H-bo
 
 - **Small dataset (N ≈ 750):** The primary limitation is dataset size. With ~750 experiments and significant class imbalance (Amorphous dominant), the model has limited statistical power, particularly for the minority Partial class which is rarely predicted. Cross-validated QWK values in the range of 0.2–0.4 reflect genuine uncertainty rather than modeling failure.
 
-- **Predictive accuracy:** While absolute classification accuracy is moderate on the full three-class problem, the model excels at the task most critical for BO: **ranking the more crystalline candidates above less crystalline ones.** Bayesian Optimization only requires the surrogate to *rank* candidate conditions by predicted crystallinity, not to predict exact outcomes, and the model performs very well in this regard.
+- **Predictive accuracy:** Absolute classification accuracy is moderate on the full three-class problem. The model is stronger at the task most critical for BO — **ranking more crystalline candidates above less crystalline ones** — as quantified by per-class ROC-AUC, average precision, and top-k precision. Bayesian Optimization only requires the surrogate to *rank* candidate conditions by predicted crystallinity, not to predict exact outcomes.
 
 - **Partial class imbalance:** The Partial crystallinity class (PXRD score 3–5) is underrepresented and physically ambiguous. Its boundary with Amorphous and Crystalline is soft, introducing label noise.
 
@@ -175,7 +178,7 @@ The RF | MI only model identifies temperature, metal concentration, solvent H-bo
 
 ### Next Steps
 
-1. **Implement the Bayesian Optimization active loop:** The BO framework (`bo_core.py`, `bo_metrics.py`) is fully scaffolded with BORE, EI, LCB, Thompson Sampling, and PI-Ordinal acquisition functions. The next step is to run the experimental recommendation loop: generate candidate conditions → synthesize top candidates → update the dataset → refit the surrogate.
+1. **Run the experimental BO loop:** The BO framework (`bo_core.py`, `bo_metrics.py`) implements LFBO-EI, LFBO-SSL, EI, and Thompson Sampling acquisitions with retrospective validation (multi-seed, per-cluster, and LOCO). The next step is the prospective loop: generate candidate conditions → synthesize top candidates → update the dataset → refit the surrogate.
 
 2. **Expand the dataset:** Each new experimental cycle adds data to the historically underrepresented Partial and Crystalline classes, improving the surrogate over time (active learning effect).
 
@@ -198,7 +201,7 @@ The RF | MI only model identifies temperature, metal concentration, solvent H-bo
 chmod +x install.sh && ./install.sh
 ```
 
-> **Note:** `mordred` requires `numpy < 2.0`. The `requirements.txt` pins `numpy==2.0.2` and applies a compatibility patch at import time in `featurization.py`.
+> **Note:** `mordred` declares `numpy < 2.0` but works with `numpy 2.0.2` after a small compatibility shim applied at import time in `featurization.py`. `install.sh` installs `mordred` with `--no-deps` and pins `numpy==2.0.2` and `pandas==2.2.2` to keep the resolver from downgrading them — use `install.sh` rather than installing `requirements.txt` directly.
 
 ### Running the Pipeline
 
@@ -260,11 +263,17 @@ All stochastic components are seeded with `SEED = 42`:
 | `models.py` | `FrankHallOrdinalClassifier`, `TripletTrainer`, `AdaptiveSelectKBest` (stratified MI), scoring metrics (`qwk_0_9`, `mae_0_9`, `within1`, `exact_acc`), pipeline factory functions |
 | `pipeline.py` | Optuna objective functions for all 6 pipeline variants, `eval_pipe`, progress callbacks |
 | `evaluation.py` | `plot_roc_prc`, `plot_learning_curves`, `plot_confusion_matrices`, `run_shap_featurized` |
-| `bo_core.py` | BO loop — `BOLoop`, `CandidateFeaturizer`, acquisition functions (EI, BORE, LCB, PI, Thompson Sampling), `SearchSpace`, `BOCheckpointer` |
-| `bo_metrics.py` | BO simulation metrics (AF, EF, Top%) and visualization functions |
+| `bo_core.py` | BO loop — `BOLoop`, `CandidateFeaturizer`, acquisition functions (LFBO-EI, LFBO-SSL, EI, Thompson Sampling), `SearchSpace`, `TrustRegion`, `BOCheckpointer` |
+| `bo_metrics.py` | BO simulation metrics (AF, EF, hit rate, simple regret, calibration) and visualization functions |
+| `bo_featurize.py` | Featurizes novel candidate chemistries into the training feature space for recommend mode |
+| `bo_gamma_sweep.py` | Sensitivity sweep over the LFBO elite-quantile gamma |
+| `bo_tail_alpha_sweep.py` | Sensitivity sweep over the tail-weighting alpha |
+| `bo_paired_compare.py` | Paired multi-seed comparison of two acquisition strategies on identical init splits |
+| `bo_cluster_check.py` | Diagnostics for the SSL cluster assumption underlying LFBO-SSL |
 | `cosmo_features.py` | COSMO-RS sigma-profile featurizer for solvent mixtures |
-| `requirements.txt` | Pinned Python dependencies |
-| `docs/bo_plan.md` | Bayesian Optimization design notes |
+| `app/` | Streamlit web app (COMPASS): recommendations, result recording, model retraining |
+| `requirements.txt` | Pinned Python dependencies (install via `install.sh`) |
+| `docs/` | Generated BO evaluation figures and recommendation logs |
 
 ## Pipeline Overview
 
@@ -354,6 +363,6 @@ Hub element identity (Si, Ge, Sn), arm length statistics, arm backbone type (alk
 
 Triplet-based contrastive learning outperforms SupCon in this setting and is the preferred approach. Crystalline samples (class 2) serve as anchors and positives; Partial samples (class 1, hard negatives) or Amorphous (class 0, easy negatives) serve as negatives.
 
-## OS / Hyperparameter Notes
+## Determinism Notes
 
-RF and XGBoost hyperparameters may require re-tuning depending on the operating system. Linux has shown the best results. On macOS or Windows, delete `best_params.pkl` and `optuna.db` and re-run to obtain OS-appropriate hyperparameters.
+All stochastic components are seeded (see table above), but bit-exact reproducibility across operating systems and BLAS builds is not guaranteed: UMAP, KMeans, and tree ensembles can produce slightly different results on different platforms, which propagates to the Optuna-selected hyperparameters. Reported results were obtained on Linux. To reproduce on another platform, delete `checkpoints/best_params.pkl` and `checkpoints/optuna.db` and re-run the tuning step.

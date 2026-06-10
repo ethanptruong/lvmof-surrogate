@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "LVMOF-Surrogate: Machine Learning and Bayesian Optimization for Low-Valent MOF Synthesis"
+authors:
+  - family-names: Truong
+    given-names: Ethan
+    affiliation: "Cohen Laboratory, University of California San Diego"
+repository-code: "https://github.com/ethanptruong/lvmof-surrogate"
+license: MIT
+year: 2026

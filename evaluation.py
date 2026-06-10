@@ -21,6 +21,43 @@ from sklearn.metrics import (
 from models import scoring_ordinal
 
 
+_SHAP_XGB_PATCHED = False
+
+
+def _patch_xgb_base_score_for_shap(_=None):
+    """Workaround for SHAP 0.49 / XGBoost 3.x incompatibility.
+
+    Why: XGBoost 3.x serializes ``base_score`` in the raw UBJ model bytes as a
+    JSON array string like ``"[5E-1]"``. SHAP's ``XGBTreeModelLoader.__init__``
+    does ``float(learner_model_param["base_score"])`` and crashes. ``load_config``
+    can't fix it because XGBoost re-renders the array on every save_raw. We
+    monkey-patch SHAP's loader once to strip the brackets after decode.
+    """
+    global _SHAP_XGB_PATCHED
+    if _SHAP_XGB_PATCHED:
+        return
+    try:
+        import io
+        import shap.explainers._tree as _t
+        _orig_decode = _t.decode_ubjson_buffer
+
+        def _decode_with_base_score_fix(fd):
+            jmodel = _orig_decode(fd)
+            try:
+                lmp = jmodel["learner"]["learner_model_param"]
+                bs = lmp.get("base_score")
+                if isinstance(bs, str) and bs.startswith("[") and bs.endswith("]"):
+                    lmp["base_score"] = bs[1:-1]
+            except (KeyError, TypeError):
+                pass
+            return jmodel
+
+        _t.decode_ubjson_buffer = _decode_with_base_score_fix
+        _SHAP_XGB_PATCHED = True
+    except Exception:
+        pass
+
+
 def _partition_cv(cv):
     """Return a single-repeat StratifiedGroupKFold for use with cross_val_predict.
     cross_val_predict requires partitions; repeated CV violates this."""
@@ -143,6 +180,128 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
 
     results_auc.to_csv("roc_prc_auc_summary.csv", index=False)
     print("\nSaved: roc_prc_auc_summary.csv")
+
+
+# ─────────────────────────────────────────────────────────────
+# plot_top_k_precision
+# ─────────────────────────────────────────────────────────────
+def plot_top_k_precision(pipelines, X, y, cv, groups,
+                         positive_class=2, k_values=None) -> None:
+    """
+    Per-fold top-k precision and hit-rate for ``positive_class``.
+
+    For each CV fold:
+      - fit pipeline on train, predict_proba on val
+      - rank val samples by P(positive_class) descending
+      - precision@k = (# truly-positive in top-k) / k
+      - hit@k       = 1 if ANY of top-k is truly positive, else 0
+
+    Aggregates mean ± std across folds. ``hit@k`` is the BO-relevant metric:
+    "given a held-out chemistry, did the model land ≥1 crystalline condition
+    in its top-k picks?"
+    """
+    if k_values is None:
+        k_values = [1, 2, 3, 5, 10, 20]
+
+    fold_cv = _partition_cv(cv)
+    CLASS_LABELS = {0: "Amorphous", 1: "Partial", 2: "Crystalline"}
+    cls_name = CLASS_LABELS.get(positive_class, str(positive_class))
+    prevalence = float((y == positive_class).mean())
+
+    summary_rows = []
+    per_fold_rows = []
+
+    print(f"\n─── Computing top-k precision for {cls_name} ────────────────────")
+    for name, pipe, _ in pipelines:
+        print(f"Running: {name}")
+        prec_at_k = {k: [] for k in k_values}
+        hit_at_k  = {k: [] for k in k_values}
+
+        for fold_idx, (tr_idx, va_idx) in enumerate(
+                fold_cv.split(X, y, groups=groups)):
+            est = clone(pipe)
+            est.fit(X[tr_idx], y[tr_idx])
+            proba = est.predict_proba(X[va_idx])[:, positive_class]
+            y_bin = (y[va_idx] == positive_class).astype(int)
+
+            order = np.argsort(-proba)
+            n_val = len(va_idx)
+            for k in k_values:
+                k_eff = min(k, n_val)
+                top_k = order[:k_eff]
+                hits  = int(y_bin[top_k].sum())
+                p     = hits / k_eff
+                h     = int(hits > 0)
+                prec_at_k[k].append(p)
+                hit_at_k[k].append(h)
+                per_fold_rows.append({
+                    "pipeline": name, "fold": fold_idx, "k": k,
+                    "precision_at_k": p, "hit_at_k": h,
+                    "n_val": n_val, "n_pos_val": int(y_bin.sum()),
+                })
+
+        for k in k_values:
+            p_arr = np.array(prec_at_k[k])
+            h_arr = np.array(hit_at_k[k])
+            summary_rows.append({
+                "pipeline": name, "k": k,
+                "precision_at_k_mean": float(p_arr.mean()),
+                "precision_at_k_std":  float(p_arr.std()),
+                "hit_at_k_mean":       float(h_arr.mean()),
+                "hit_at_k_std":        float(h_arr.std()),
+                "n_folds":             int(len(p_arr)),
+            })
+
+    summary_df = pd.DataFrame(summary_rows)
+
+    fig, (ax_p, ax_h) = plt.subplots(1, 2, figsize=(14, 5))
+    for name, _, _ in pipelines:
+        sub = summary_df[summary_df["pipeline"] == name].sort_values("k")
+        ks = sub["k"].values
+        pm, ps = sub["precision_at_k_mean"].values, sub["precision_at_k_std"].values
+        hm, hs = sub["hit_at_k_mean"].values,       sub["hit_at_k_std"].values
+        ax_p.plot(ks, pm, marker="o", lw=2, label=name)
+        ax_p.fill_between(ks, np.clip(pm - ps, 0, 1),
+                              np.clip(pm + ps, 0, 1), alpha=0.15)
+        ax_h.plot(ks, hm, marker="o", lw=2, label=name)
+        ax_h.fill_between(ks, np.clip(hm - hs, 0, 1),
+                              np.clip(hm + hs, 0, 1), alpha=0.15)
+
+    ax_p.axhline(prevalence, ls="--", color="gray", lw=1,
+                 label=f"Random baseline = {prevalence:.3f}")
+    ax_p.set_xlabel("k (# top picks)")
+    ax_p.set_ylabel(f"Precision@k for {cls_name}")
+    ax_p.set_title(f"Top-k Precision — {cls_name} vs Rest")
+    ax_p.set_ylim(0, 1.02)
+    ax_p.legend(fontsize=9, loc="best")
+    ax_p.grid(alpha=0.25)
+
+    ax_h.set_xlabel("k (# top picks)")
+    ax_h.set_ylabel(f"Hit-rate@k for {cls_name}")
+    ax_h.set_title(f"Top-k Hit Rate — ≥1 {cls_name} in top-k (BO-relevant)")
+    ax_h.set_ylim(0, 1.02)
+    ax_h.legend(fontsize=9, loc="best")
+    ax_h.grid(alpha=0.25)
+
+    plt.tight_layout()
+    plt.savefig("top_k_precision.png", dpi=180, bbox_inches="tight")
+    plt.close("all")
+    print("Saved: top_k_precision.png")
+
+    summary_df.to_csv("top_k_precision_summary.csv", index=False)
+    pd.DataFrame(per_fold_rows).to_csv("top_k_precision_per_fold.csv", index=False)
+    print("Saved: top_k_precision_summary.csv")
+    print("Saved: top_k_precision_per_fold.csv")
+
+    print(f"\n─── Top-k summary ({cls_name}) ───────────────────────────────────")
+    pivot_p = summary_df.pivot(index="pipeline", columns="k",
+                               values="precision_at_k_mean")
+    pivot_h = summary_df.pivot(index="pipeline", columns="k",
+                               values="hit_at_k_mean")
+    print("\nPrecision@k (mean across folds):")
+    print(pivot_p.to_string(float_format=lambda x: f"{x:.3f}"))
+    print("\nHit-rate@k (fraction of folds with ≥1 positive in top-k):")
+    print(pivot_h.to_string(float_format=lambda x: f"{x:.3f}"))
 
 
 # ─────────────────────────────────────────────────────────────
@@ -473,6 +632,7 @@ def run_shap_analysis(pipes, X, y) -> None:
         for threshold, base_model in classifiers.items():
             print(f"  Explaining Frank-Hall binary model for threshold k={threshold}")
 
+            _patch_xgb_base_score_for_shap(base_model)
             explainer = shap.TreeExplainer(base_model)
             shap_values = explainer.shap_values(X_model)
 
@@ -646,6 +806,29 @@ def transform_with_names(fitted_pipe, X_in, names_in, groups_in, label=""):
             names = names[mask]
             grps  = grps[mask]
 
+        elif step_name == "kmeans_aug":
+            # KMeansFeatureAugmenter outputs np.hstack([X, cluster_OHE]).
+            # Existing names stay attached; append one name per cluster column.
+            n_in   = Xt.shape[1]
+            Xt     = step.transform(Xt)
+            n_new  = Xt.shape[1] - n_in
+            n_clust = getattr(step, "n_clusters", n_new)
+            ohe_names = [f"kmeans_cluster_{i}" for i in range(n_new)]
+            ohe_grps  = ["KMeans Cluster OHE"] * n_new
+            if len(names) == n_in:
+                names = np.array(list(names) + ohe_names, dtype=object)
+                grps  = np.array(list(grps)  + ohe_grps,  dtype=object)
+            else:
+                # Defensive: if upstream name tracking drifted, still label
+                # the new OHE columns rather than wiping everything.
+                print(f"  [warn] kmeans_aug: names had {len(names)} entries "
+                      f"but input width was {n_in}; padding to align.")
+                pad = max(0, n_in - len(names))
+                base_names = list(names) + [f"unknown_{i}" for i in range(pad)]
+                base_grps  = list(grps)  + ["Unknown"] * pad
+                names = np.array(base_names[:n_in] + ohe_names, dtype=object)
+                grps  = np.array(base_grps[:n_in]  + ohe_grps,  dtype=object)
+
         else:
             try:
                 Xt_new = step.transform(Xt)
@@ -747,6 +930,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
     thresh_abs = {}
     shap_stack = []
     for thresh, tree_model in classifiers.items():
+        _patch_xgb_base_score_for_shap(tree_model)
         explainer = shap.TreeExplainer(tree_model)
         sv = np.asarray(explainer.shap_values(X_model))
         if sv.ndim == 3:

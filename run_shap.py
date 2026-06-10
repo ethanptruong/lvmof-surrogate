@@ -88,7 +88,7 @@ def main():
     X_raw, y_int, mask = prepare_labels(df_merged, X_final)
     y = np.array([remap_score(s) for s in y_int])
 
-    X_vt, vt_pre = apply_variance_threshold(X_raw)
+    X_vt, vt_pre, _fitted_vt = apply_variance_threshold(X_raw)
     Xprocnorm, interactions, _ = build_process_interactions(
         df_merged, mask, process_cols_present
     )

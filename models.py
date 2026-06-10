@@ -630,18 +630,38 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
 # ─────────────────────────────────────────────────────────────
 # 5.  Pipeline step builders
 # ─────────────────────────────────────────────────────────────
-def _base_steps(with_cl: bool) -> list:
+def _base_steps(with_cl: bool, n_chem_features=None) -> list:
     """
     Common feature prefix:
-        impute -> vt -> [Triplet CL] -> mi -> pca -> smote
 
-    When with_cl=True the TripletTrainer appends a 128-d embedding to the
-    VT-filtered features before MI selection.
+      Legacy (n_chem_features=None):
+          impute → vt → [Triplet CL] → mi → smote
+
+      Fold-local KMeans (n_chem_features=int, leakage-free):
+          impute → kmeans_aug → vt → [Triplet CL] → mi → smote
+
+    With CL, the TripletTrainer appends a 128-d embedding to the upstream
+    features before MI selection.
+
+    The augmenter runs *before* VT so that any zero-variance column dropped
+    by VT in a particular CV fold cannot shift the chem-vs-process slice
+    index the augmenter relies on.
     """
-    steps = [
-        ("impute", SimpleImputer(strategy="median")),
-        ("vt",     VarianceThreshold(threshold=0.0)),
-    ]
+    steps = [("impute", SimpleImputer(strategy="median"))]
+
+    if n_chem_features is not None:
+        from dimensionality import KMeansFeatureAugmenter
+        from config import N_CLUSTERS
+        steps.append((
+            "kmeans_aug",
+            KMeansFeatureAugmenter(
+                n_clusters=N_CLUSTERS,
+                n_chem_features=n_chem_features,
+                random_state=RANDOM_STATE,
+            ),
+        ))
+
+    steps.append(("vt", VarianceThreshold(threshold=0.0)))
 
     if with_cl:
         steps.append((
@@ -686,17 +706,31 @@ def _base_steps(with_cl: bool) -> list:
     return steps
 
 
-def _cl_only_steps() -> list:
+def _cl_only_steps(n_chem_features=None) -> list:
     """
     CL-only feature pipeline:
-        impute -> vt -> Triplet CL (embedding only) -> smote
+
+      Legacy:        impute → vt → CL → smote
+      Fold-local:    impute → kmeans_aug → vt → CL → smote
 
     No MI selection: the downstream classifier operates purely on the
-    128-d triplet embedding space.
+    128-d triplet embedding space. When n_chem_features is provided the
+    augmenter runs before VT so VT cannot disturb the chem slice index.
     """
-    return [
-        ("impute", SimpleImputer(strategy="median")),
-        ("vt",     VarianceThreshold(threshold=0.0)),
+    steps = [("impute", SimpleImputer(strategy="median"))]
+    if n_chem_features is not None:
+        from dimensionality import KMeansFeatureAugmenter
+        from config import N_CLUSTERS
+        steps.append((
+            "kmeans_aug",
+            KMeansFeatureAugmenter(
+                n_clusters=N_CLUSTERS,
+                n_chem_features=n_chem_features,
+                random_state=RANDOM_STATE,
+            ),
+        ))
+    steps.append(("vt", VarianceThreshold(threshold=0.0)))
+    steps += [
         (
             "cl",
             TripletTrainer(
@@ -723,14 +757,16 @@ def _cl_only_steps() -> list:
             ),
         ),
     ]
+    return steps
 
 
 # ─────────────────────────────────────────────────────────────
 # 6.  Pipeline factories
 # ─────────────────────────────────────────────────────────────
-def make_rf_pipe(rf_params, with_cl=False):
+def make_rf_pipe(rf_params, with_cl=False, n_chem_features=None):
     return ImbPipeline(
-        steps=_base_steps(with_cl=with_cl) + [
+        steps=_base_steps(with_cl=with_cl,
+                          n_chem_features=n_chem_features) + [
             (
                 "ordinal_rf",
                 FrankHallOrdinalClassifier(
@@ -746,9 +782,10 @@ def make_rf_pipe(rf_params, with_cl=False):
     )
 
 
-def make_xgb_pipe(xgb_params, with_cl=False):
+def make_xgb_pipe(xgb_params, with_cl=False, n_chem_features=None):
     return ImbPipeline(
-        steps=_base_steps(with_cl=with_cl) + [
+        steps=_base_steps(with_cl=with_cl,
+                          n_chem_features=n_chem_features) + [
             (
                 "ordinal_xgb",
                 FrankHallOrdinalClassifier(
@@ -762,9 +799,9 @@ def make_xgb_pipe(xgb_params, with_cl=False):
     )
 
 
-def make_rf_pipe_cl_only(rf_params):
+def make_rf_pipe_cl_only(rf_params, n_chem_features=None):
     return ImbPipeline(
-        steps=_cl_only_steps() + [
+        steps=_cl_only_steps(n_chem_features=n_chem_features) + [
             (
                 "ordinal_rf",
                 FrankHallOrdinalClassifier(
@@ -780,9 +817,9 @@ def make_rf_pipe_cl_only(rf_params):
     )
 
 
-def make_xgb_pipe_cl_only(xgb_params):
+def make_xgb_pipe_cl_only(xgb_params, n_chem_features=None):
     return ImbPipeline(
-        steps=_cl_only_steps() + [
+        steps=_cl_only_steps(n_chem_features=n_chem_features) + [
             (
                 "ordinal_xgb",
                 FrankHallOrdinalClassifier(
@@ -799,12 +836,28 @@ def make_xgb_pipe_cl_only(xgb_params):
 # ─────────────────────────────────────────────────────────────
 # 7.  Regression pipeline factories (for BO surrogate)
 # ─────────────────────────────────────────────────────────────
-def _base_steps_regression(with_cl: bool) -> list:
-    """Feature prefix for regression: impute → vt → [cl] → mi.  No SMOTE."""
-    steps = [
-        ("impute", SimpleImputer(strategy="median")),
-        ("vt",     VarianceThreshold(threshold=0.0)),
-    ]
+def _base_steps_regression(with_cl: bool, n_chem_features=None) -> list:
+    """Feature prefix for regression.
+
+      Legacy:     impute → vt → [cl] → mi
+      Fold-local: impute → kmeans_aug → vt → [cl] → mi
+
+    No SMOTE. The augmenter runs before VT so any fold-local zero-variance
+    column drop cannot shift the chem-vs-process slice index.
+    """
+    steps = [("impute", SimpleImputer(strategy="median"))]
+    if n_chem_features is not None:
+        from dimensionality import KMeansFeatureAugmenter
+        from config import N_CLUSTERS
+        steps.append((
+            "kmeans_aug",
+            KMeansFeatureAugmenter(
+                n_clusters=N_CLUSTERS,
+                n_chem_features=n_chem_features,
+                random_state=RANDOM_STATE,
+            ),
+        ))
+    steps.append(("vt", VarianceThreshold(threshold=0.0)))
     if with_cl:
         steps.append((
             "cl",
@@ -837,10 +890,11 @@ def _base_steps_regression(with_cl: bool) -> list:
     return steps
 
 
-def make_rf_regressor_pipe(rf_params, with_cl=False):
+def make_rf_regressor_pipe(rf_params, with_cl=False, n_chem_features=None):
     """RF regressor pipeline for BO surrogate (no SMOTE, no ordinal wrapper)."""
     return ImbPipeline(
-        steps=_base_steps_regression(with_cl=with_cl) + [
+        steps=_base_steps_regression(with_cl=with_cl,
+                                     n_chem_features=n_chem_features) + [
             (
                 "rf_reg",
                 RandomForestRegressor(
@@ -854,12 +908,13 @@ def make_rf_regressor_pipe(rf_params, with_cl=False):
     )
 
 
-def make_xgb_regressor_pipe(xgb_params, with_cl=False):
+def make_xgb_regressor_pipe(xgb_params, with_cl=False, n_chem_features=None):
     """XGBoost regressor pipeline for BO surrogate (no SMOTE, no ordinal wrapper)."""
     xgb_reg_fixed = {k: v for k, v in XGB_FIXED.items() if k != "eval_metric"}
     xgb_reg_fixed["eval_metric"] = "rmse"
     return ImbPipeline(
-        steps=_base_steps_regression(with_cl=with_cl) + [
+        steps=_base_steps_regression(with_cl=with_cl,
+                                     n_chem_features=n_chem_features) + [
             (
                 "xgb_reg",
                 XGBRegressor(
@@ -871,11 +926,29 @@ def make_xgb_regressor_pipe(xgb_params, with_cl=False):
     )
 
 
-def _cl_only_steps_regression() -> list:
-    """CL-only feature pipeline for regression: impute → vt → CL (embedding only). No MI, no SMOTE."""
-    return [
-        ("impute", SimpleImputer(strategy="median")),
-        ("vt",     VarianceThreshold(threshold=0.0)),
+def _cl_only_steps_regression(n_chem_features=None) -> list:
+    """CL-only regression feature pipeline.
+
+      Legacy:     impute → vt → CL
+      Fold-local: impute → kmeans_aug → vt → CL
+
+    No MI, no SMOTE. Augmenter runs before VT to keep the chem slice index
+    valid even if VT drops a fold-local zero-variance column.
+    """
+    steps = [("impute", SimpleImputer(strategy="median"))]
+    if n_chem_features is not None:
+        from dimensionality import KMeansFeatureAugmenter
+        from config import N_CLUSTERS
+        steps.append((
+            "kmeans_aug",
+            KMeansFeatureAugmenter(
+                n_clusters=N_CLUSTERS,
+                n_chem_features=n_chem_features,
+                random_state=RANDOM_STATE,
+            ),
+        ))
+    steps.append(("vt", VarianceThreshold(threshold=0.0)))
+    steps += [
         (
             "cl",
             TripletTrainer(
@@ -894,12 +967,13 @@ def _cl_only_steps_regression() -> list:
             ),
         ),
     ]
+    return steps
 
 
-def make_rf_regressor_pipe_cl_only(rf_params):
+def make_rf_regressor_pipe_cl_only(rf_params, n_chem_features=None):
     """RF regressor on CL-only embedding (no MI, no SMOTE)."""
     return ImbPipeline(
-        steps=_cl_only_steps_regression() + [
+        steps=_cl_only_steps_regression(n_chem_features=n_chem_features) + [
             (
                 "rf_reg",
                 RandomForestRegressor(
@@ -913,12 +987,12 @@ def make_rf_regressor_pipe_cl_only(rf_params):
     )
 
 
-def make_xgb_regressor_pipe_cl_only(xgb_params):
+def make_xgb_regressor_pipe_cl_only(xgb_params, n_chem_features=None):
     """XGBoost regressor on CL-only embedding (no MI, no SMOTE)."""
     xgb_reg_fixed = {k: v for k, v in XGB_FIXED.items() if k != "eval_metric"}
     xgb_reg_fixed["eval_metric"] = "rmse"
     return ImbPipeline(
-        steps=_cl_only_steps_regression() + [
+        steps=_cl_only_steps_regression(n_chem_features=n_chem_features) + [
             (
                 "xgb_reg",
                 XGBRegressor(

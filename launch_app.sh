@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the LVMOF Synthesis Assistant Streamlit app on this workstation.
+# Launch COMPASS (the LVMOF Synthesis Assistant) Streamlit app on this workstation.
 #
 #   1. Activate the project Python environment if you use one
 #      (uncomment one of the lines below).
@@ -7,6 +7,8 @@
 #   3. Chemists open http://<this-machine>:8501 in their browser.
 #
 # Export LVMOF_ADMIN=1 before launching to expose the Admin page.
+#
+# Output is shown in the terminal AND written to logs/app_<timestamp>.log.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -20,8 +22,13 @@ elif [ -f ".venv/bin/activate" ]; then
 fi
 # conda activate lvmof
 
-# ── Run Streamlit ─────────────────────────────────────────────────────────
-exec streamlit run app/streamlit_app.py \
+# ── Build timestamped log path ────────────────────────────────────────────
+mkdir -p logs
+LOGFILE="logs/app_$(date +%Y%m%d_%H%M%S).log"
+echo "Logging to $LOGFILE"
+
+# ── Run Streamlit (tee to terminal + log file) ────────────────────────────
+streamlit run app/streamlit_app.py \
     --server.port 8501 \
     --server.address 0.0.0.0 \
-    --browser.gatherUsageStats false
+    --browser.gatherUsageStats false 2>&1 | tee "$LOGFILE"
