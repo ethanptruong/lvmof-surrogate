@@ -16,7 +16,10 @@ morfeus-ml==0.8.0
 networkx==3.6.1
 optuna==4.7.0
 colorlog
-drfp==0.3.7
+# 0.2.6 matches the env the checkpoints were trained with; 0.3.x either
+# requires numpy>=2.2.2 (0.3.7) or drags in the deprecated rdkit-pypi
+# package that collides with the real rdkit install (0.3.4-0.3.6).
+drfp==0.2.6
 dscribe
 ase
 sparse

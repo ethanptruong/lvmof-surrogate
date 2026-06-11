@@ -1,0 +1,67 @@
+# Nightly off-site backup of the COMPASS persistent volume.
+#
+# Pulls /data (experiment Excel, checkpoints, docs — NOT the rebuildable
+# HuggingFace cache) off the Fly machine and uploads a dated tarball to a
+# PRIVATE Cloudflare R2 bucket. This repo is public, so the backup must never
+# be stored as a workflow artifact or committed here.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   FLY_API_TOKEN         fly tokens create deploy -a mof-compass
+#   R2_ACCOUNT_ID         Cloudflare dashboard → R2 → account ID
+#   R2_ACCESS_KEY_ID      R2 → Manage API tokens → create (Object Read & Write)
+#   R2_SECRET_ACCESS_KEY  shown once when the token is created
+#   R2_BUCKET             e.g. compass-backups
+#
+# Retention: set an R2 lifecycle rule on the bucket (e.g. expire after 180
+# days) so old tarballs are pruned automatically.
+#
+# Note: GitHub disables scheduled workflows on public repos after 60 days
+# without repo activity. Any commit re-enables it; check the Actions tab
+# occasionally once the repo goes quiet.
+
+name: Backup COMPASS data
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC = 1–2 AM Pacific, nightly
+  workflow_dispatch: {} # manual "Run workflow" button for testing
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create tarball on the Fly machine
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl ssh console -a mof-compass -q -C \
+            "tar czf /tmp/compass-backup.tar.gz -C /data data checkpoints docs"
+
+      - name: Download tarball
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl ssh sftp get -a mof-compass \
+            /tmp/compass-backup.tar.gz compass-backup.tar.gz
+          ls -lh compass-backup.tar.gz
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp compass-backup.tar.gz \
+            "s3://${{ secrets.R2_BUCKET }}/compass-$(date -u +%F).tar.gz" \
+            --endpoint-url "https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com"
+
+      - name: Clean up tarball on the machine
+        if: always()
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl ssh console -a mof-compass -q -C "rm -f /tmp/compass-backup.tar.gz" || true
