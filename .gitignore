@@ -22,5 +22,7 @@ archive/
 docs/bo_recommendations_*
 # Internal review notes (not part of the public release)
 docs/PUBLICATION_REVIEW.md
+# Unpublished manuscript drafts — never push to the public repo
+paper/
 # App assets are needed at runtime despite the global *.png ignore
 !app/assets/**/*.png

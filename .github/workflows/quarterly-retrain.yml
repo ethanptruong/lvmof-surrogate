@@ -110,6 +110,16 @@ jobs:
           # reuse, saves a lot of mordred/COSMO time.
           flyctl ssh sftp get -a "$APP" \
             /data/checkpoints/smiles_cache.pkl checkpoints/smiles_cache.pkl || true
+          # Mirror the NAMES of the live site's BO calibration plots (PNGs are
+          # gitignored, so the checkout has none). The end-of-pipeline
+          # calibration refresh regenerates every docs/bo_calibration_*.png it
+          # sees — empty placeholders are enough for it to know which
+          # acquisition×surrogate plots the site is showing.
+          mkdir -p docs
+          flyctl ssh console -a "$APP" -q -C "ls /data/docs" | tr -d '\r' \
+            | grep -E '^bo_calibration_.*\.png$' \
+            | while read -r f; do touch "docs/$f"; done || true
+          ls docs
           ls -la data | head -20
 
       - name: Pull existing tuning state (refresh / resume only)
@@ -204,6 +214,21 @@ jobs:
           # Hot-apply to the running app (the entrypoint redoes this on boot).
           flyctl ssh console -a "$APP" -q -C "cp -a /data/artifacts/. /app/"
           flyctl ssh console -a "$APP" -q -C "rm /data/artifacts.tar.gz"
+
+      - name: Push regenerated BO calibration plots
+        if: steps.train.outcome == 'success'
+        run: |
+          # The pipeline re-runs surrogate calibration at the end of every
+          # retrain and writes docs/bo_calibration_*.png. On the app, docs/
+          # is a symlink to /data/docs (the volume), so putting the files
+          # there makes them live immediately AND persistent — no boot-time
+          # overlay needed (unlike the root-level artifacts above).
+          find docs -maxdepth 1 -name 'bo_calibration_*.png' -newer .retrain_marker \
+            | while read -r f; do
+                echo "pushing $f"
+                flyctl ssh console -a "$APP" -q -C "rm -f /data/$f" || true
+                flyctl ssh sftp put -a "$APP" "$f" "/data/$f"
+              done
 
       - name: Verify the site is still healthy
         if: steps.train.outcome == 'success'

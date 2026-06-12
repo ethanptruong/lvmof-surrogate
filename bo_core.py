@@ -2467,6 +2467,85 @@ def resolve_batch_strategy(acquisition_name, requested_strategy=None):
     return requested_strategy
 
 
+def make_init_pool_split(X, y_raw, init_fraction=BO_INIT_FRACTION,
+                         groups=None, random_state=RANDOM_STATE):
+    """Stratified init/pool split used by BO simulation AND the standalone
+    calibration mode — keeping them identical means a calibration-only run
+    reproduces exactly the split a simulate run would evaluate on.
+
+    When chemistry groups are available, take init_fraction of EACH cluster
+    (score-stratified within the cluster where possible).  This guarantees
+    every chemistry family is represented in the initial training set while
+    holding back the rest of each cluster as the oracle pool.
+
+    Why not GroupShuffleSplit (entire clusters in/out)?  Too extreme — the
+    surrogate has zero signal from pool clusters, making generalisation
+    unrealistically hard.  The per-cluster split mirrors the real lab
+    situation: you have done some experiments with each linker type and
+    want to know which remaining experiments to run next.
+
+    Why not plain StratifiedShuffleSplit (score only)?  Both init and pool
+    contain the same chemistry families, so the surrogate can trivially
+    interpolate within a known cluster → inflated AF/EF.
+
+    Returns (init_idx, pool_idx, groups, n_clusters); groups/n_clusters are
+    None when no chemistry groups were provided.
+    """
+    X = np.asarray(X, dtype=float)
+    y_raw = np.asarray(y_raw, dtype=float)
+    y_binned = np.clip(y_raw.astype(int), 0, 9)
+
+    if groups is not None:
+        groups = np.asarray(groups, dtype=int)
+        n_clusters = int(groups.max()) + 1
+
+        init_list, pool_list = [], []
+        for cid in range(n_clusters):
+            c_idx = np.where(groups == cid)[0]
+            if len(c_idx) < 2:
+                # Cluster too small to split — put entirely in init
+                init_list.extend(c_idx.tolist())
+                continue
+            y_c = y_binned[c_idx]
+            try:
+                sss_c = StratifiedShuffleSplit(
+                    n_splits=1, train_size=init_fraction,
+                    random_state=random_state
+                )
+                i_init, i_pool = next(sss_c.split(c_idx, y_c))
+            except ValueError:
+                # Score stratification failed — random split within cluster
+                rng_c = np.random.RandomState(random_state + cid)
+                perm = rng_c.permutation(len(c_idx))
+                n_init = max(1, int(len(c_idx) * init_fraction))
+                i_init, i_pool = perm[:n_init], perm[n_init:]
+            init_list.extend(c_idx[i_init].tolist())
+            pool_list.extend(c_idx[i_pool].tolist())
+
+        init_idx = np.array(init_list, dtype=int)
+        pool_idx = np.array(pool_list, dtype=int)
+
+        # Diagnostics per cluster
+        print(f"[BO simulation] Per-cluster stratified split "
+              f"({init_fraction:.0%} init / {1 - init_fraction:.0%} pool "
+              f"from each of {n_clusters} clusters):")
+        for cid in range(n_clusters):
+            n_init_c = int((groups[init_idx] == cid).sum())
+            n_pool_c = int((groups[pool_idx] == cid).sum())
+            print(f"    cluster {cid}: init={n_init_c}  pool={n_pool_c}")
+        print(f"  Total: init={len(init_idx)}  pool={len(pool_idx)}")
+    else:
+        n_clusters = None
+        sss = StratifiedShuffleSplit(
+            n_splits=1, train_size=init_fraction,
+            random_state=random_state
+        )
+        init_idx, pool_idx = next(sss.split(X, y_binned))
+        print("[BO simulation] No chemistry groups — using score-stratified split.")
+
+    return init_idx, pool_idx, groups, n_clusters
+
+
 class BOLoop:
     """Main BO loop for simulation, recommendation, and batch modes."""
 
@@ -2537,73 +2616,11 @@ class BOLoop:
         """
         X = np.asarray(X, dtype=float)
         y_raw = np.asarray(y_raw, dtype=float)
-        n = len(y_raw)
 
-        y_binned = np.clip(y_raw.astype(int), 0, 9)
-
-        # ── Init split ────────────────────────────────────────────────────────
-        # When chemistry groups are available, take init_fraction of EACH cluster
-        # (score-stratified within the cluster where possible).  This guarantees
-        # every chemistry family is represented in the initial training set while
-        # holding back 70 % of each cluster as the oracle pool.
-        #
-        # Why not GroupShuffleSplit (entire clusters in/out)?  Too extreme — the
-        # surrogate has zero signal from pool clusters, making generalisation
-        # unrealistically hard.  The per-cluster split mirrors the real lab
-        # situation: you have done some experiments with each linker type and
-        # want to know which remaining experiments to run next.
-        #
-        # Why not plain StratifiedShuffleSplit (score only)?  Both init and pool
-        # contain the same chemistry families, so the surrogate can trivially
-        # interpolate within a known cluster → inflated AF/EF.
-        if groups is not None:
-            groups = np.asarray(groups, dtype=int)
-            n_clusters = int(groups.max()) + 1
-
-            init_list, pool_list = [], []
-            for cid in range(n_clusters):
-                c_idx = np.where(groups == cid)[0]
-                if len(c_idx) < 2:
-                    # Cluster too small to split — put entirely in init
-                    init_list.extend(c_idx.tolist())
-                    continue
-                y_c = y_binned[c_idx]
-                try:
-                    sss_c = StratifiedShuffleSplit(
-                        n_splits=1, train_size=init_fraction,
-                        random_state=self.random_state
-                    )
-                    i_init, i_pool = next(sss_c.split(c_idx, y_c))
-                except ValueError:
-                    # Score stratification failed — random split within cluster
-                    rng_c = np.random.RandomState(self.random_state + cid)
-                    perm = rng_c.permutation(len(c_idx))
-                    n_init = max(1, int(len(c_idx) * init_fraction))
-                    i_init, i_pool = perm[:n_init], perm[n_init:]
-                init_list.extend(c_idx[i_init].tolist())
-                pool_list.extend(c_idx[i_pool].tolist())
-
-            init_idx = np.array(init_list, dtype=int)
-            pool_idx = np.array(pool_list, dtype=int)
-
-            # Diagnostics per cluster
-            print(f"[BO simulation] Per-cluster stratified split "
-                  f"({init_fraction:.0%} init / {1 - init_fraction:.0%} pool "
-                  f"from each of {n_clusters} clusters):")
-            for cid in range(n_clusters):
-                n_init_c = int((groups[init_idx] == cid).sum())
-                n_pool_c = int((groups[pool_idx] == cid).sum())
-                print(f"    cluster {cid}: init={n_init_c}  pool={n_pool_c}")
-            print(f"  Total: init={len(init_idx)}  pool={len(pool_idx)}")
-        else:
-            groups     = None
-            n_clusters = None
-            sss = StratifiedShuffleSplit(
-                n_splits=1, train_size=init_fraction,
-                random_state=self.random_state
-            )
-            init_idx, pool_idx = next(sss.split(X, y_binned))
-            print("[BO simulation] No chemistry groups — using score-stratified split.")
+        init_idx, pool_idx, groups, n_clusters = make_init_pool_split(
+            X, y_raw, init_fraction=init_fraction, groups=groups,
+            random_state=self.random_state,
+        )
 
         return self._run_loop(X, y_raw, init_idx, pool_idx,
                               groups=groups, n_clusters=n_clusters,

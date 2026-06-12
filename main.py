@@ -591,6 +591,19 @@ def main(data_path=None, skip_tuning=False):
         run_shap_featurized(_shap_label, _shap_pipe, X_cv, y, X_names, X_groups,
                             top_n=15, fitted_pipe=_fitted_for_shap[_shap_label])
 
+    # ── BO calibration refresh ────────────────────────────────────────────────
+    # Every retrain (quarterly workflow, in-app Retrain / Update model)
+    # regenerates the docs/bo_calibration_*.png plots, so Model Confidence
+    # shows calibration of the model that is actually live rather than
+    # whatever the last manual BO simulate produced. Non-fatal by design: a
+    # calibration hiccup must not fail an otherwise-successful retrain (the
+    # quarterly workflow would chain pointless resume runs).
+    print("\n─── Refreshing BO calibration plots ────────────────────────────────")
+    try:
+        refresh_calibration_plots(data_path)
+    except Exception as exc:
+        print(f"[calibration] WARNING: calibration refresh failed — {exc}")
+
 # ── Bayesian Optimization ────────────────────────────────────────────────────
 
 def _load_bo_data(data_path=None):
@@ -790,6 +803,102 @@ def _resolve_surrogate(surrogate_name, params, ranking_target=False,
         return surr
 
 
+def _print_calibration_report(cal):
+    """Print the standard sigma-calibration summary for a cal dict."""
+    if "error" in cal:
+        print(f"  WARNING: {cal['error']}")
+        return
+    print(f"  n_test={cal['n_valid']}, n_zero_sigma={cal['n_zero_sigma']}")
+    print(f"  z-score mean: {cal['mean_z']:+.3f}  (ideal:  0.000)")
+    print(f"  z-score std:  {cal['std_z']:.3f}   (ideal:  1.000)")
+    print(f"  Coverage within 1σ: {cal['fraction_within_1sigma']*100:.1f}%  "
+          f"(expected: 68.3%)")
+    print(f"  Coverage within 2σ: {cal['fraction_within_2sigma']*100:.1f}%  "
+          f"(expected: 95.4%)")
+    print(f"  Mean calibration error: {cal['calibration_error']:.4f}  "
+          f"(0 = perfect)")
+    if cal["calibration_error"] > 0.10:
+        print("  NOTE: calibration error > 0.10 — sigma estimates are "
+              "unreliable. EI acquisition scores may be misleading.")
+
+
+def _compute_calibration(surrogate_name, X_cv, y_raw, groups, ck_params,
+                         ranking_target=False):
+    """Fit *surrogate_name* on the standard BO init split and score sigma
+    calibration on the held-out pool.
+
+    This is exactly the calibration check simulate mode runs after a
+    simulation, minus the (much slower) BO query loop — the split, refit and
+    metrics are identical, so the resulting plot matches what a fresh
+    simulate run would produce.
+    """
+    from bo_core import make_init_pool_split
+    from bo_metrics import compute_surrogate_calibration
+
+    init_idx, pool_idx, _, _ = make_init_pool_split(
+        X_cv, y_raw, init_fraction=BO_INIT_FRACTION,
+        groups=groups, random_state=RANDOM_STATE)
+    surrogate = _resolve_surrogate(surrogate_name, ck_params,
+                                   ranking_target=ranking_target)
+    surrogate.fit(X_cv[init_idx], y_raw[init_idx])
+    return compute_surrogate_calibration(surrogate, X_cv[pool_idx],
+                                         y_raw[pool_idx])
+
+
+_BO_SURROGATE_CHOICES = ("rf_mi", "xgb_mi", "rf_cl_mi", "xgb_cl_mi",
+                         "rf_cl_only", "xgb_cl_only")
+
+
+def refresh_calibration_plots(data_path=None):
+    """Regenerate every docs/bo_calibration_*.png against the current model.
+
+    Called automatically at the end of the training pipeline (and available
+    standalone via ``--bo --bo-mode calibrate``) so the Model Confidence page
+    never shows calibration computed from a previous model or older data.
+    Each plot's surrogate is re-fit once on the standard BO init split; the
+    default acquisition×surrogate plot is always (re)written even if it does
+    not exist yet.
+    """
+    import glob as _glob
+    from bo_metrics import plot_calibration
+
+    # Map each existing calibration plot back to its surrogate. Filenames are
+    # bo_calibration_<acquisition>_<surrogate>.png; match the surrogate as a
+    # suffix (longest names first so rf_cl_mi is never read as rf_mi).
+    plan = {}  # normalized save path -> surrogate name
+    for path in sorted(_glob.glob("docs/bo_calibration_*.png")):
+        stem = os.path.basename(path)[len("bo_calibration_"):-len(".png")]
+        surr = next((s for s in sorted(_BO_SURROGATE_CHOICES, key=len,
+                                       reverse=True)
+                     if stem == s or stem.endswith("_" + s)), None)
+        if surr is None:
+            print(f"[calibration] Skipping unrecognised plot name: {path}")
+            continue
+        plan[path.replace(os.sep, "/")] = surr
+    default_path = (f"docs/bo_calibration_{BO_DEFAULT_ACQUISITION}_"
+                    f"{BO_DEFAULT_SURROGATE}.png")
+    plan.setdefault(default_path, BO_DEFAULT_SURROGATE)
+
+    X_cv, y_raw, _, df_merged, _ = _load_bo_data(data_path)
+    from bo_core import compute_chemistry_groups
+    groups, _ = compute_chemistry_groups(df_merged)
+    ck_params = _load(PARAMS_CKPT) or {}
+
+    # One fit per unique surrogate — calibration does not depend on the
+    # acquisition function, so every acquisition-labelled plot of the same
+    # surrogate reuses one result.
+    by_surrogate = {}
+    for path, surr in plan.items():
+        by_surrogate.setdefault(surr, []).append(path)
+
+    for surr in sorted(by_surrogate):
+        print(f"\n── Surrogate Calibration ({surr}) ──")
+        cal = _compute_calibration(surr, X_cv, y_raw, groups, ck_params)
+        _print_calibration_report(cal)
+        for path in by_surrogate[surr]:
+            plot_calibration(cal, surrogate_name=surr, save_path=path)
+
+
 def run_bo(args):
     """Run Bayesian Optimization in the specified mode."""
     from bo_core import BOLoop, BOCheckpointer, RegressionSurrogate
@@ -872,22 +981,20 @@ def run_bo(args):
         pool_idx = np.array(history["pool_indices"])
         surrogate.fit(X_cv[init_idx], y_raw[init_idx])
         cal = compute_surrogate_calibration(surrogate, X_cv[pool_idx], y_raw[pool_idx])
+        _print_calibration_report(cal)
+        plot_calibration(cal, surrogate_name=args.bo_surrogate,
+                         save_path=f"docs/bo_calibration_{label}.png")
 
-        if "error" in cal:
-            print(f"  WARNING: {cal['error']}")
-        else:
-            print(f"  n_test={cal['n_valid']}, n_zero_sigma={cal['n_zero_sigma']}")
-            print(f"  z-score mean: {cal['mean_z']:+.3f}  (ideal:  0.000)")
-            print(f"  z-score std:  {cal['std_z']:.3f}   (ideal:  1.000)")
-            print(f"  Coverage within 1σ: {cal['fraction_within_1sigma']*100:.1f}%  "
-                  f"(expected: 68.3%)")
-            print(f"  Coverage within 2σ: {cal['fraction_within_2sigma']*100:.1f}%  "
-                  f"(expected: 95.4%)")
-            print(f"  Mean calibration error: {cal['calibration_error']:.4f}  "
-                  f"(0 = perfect)")
-            if cal["calibration_error"] > 0.10:
-                print("  NOTE: calibration error > 0.10 — sigma estimates are "
-                      "unreliable. EI acquisition scores may be misleading.")
+    elif args.bo_mode == "calibrate":
+        # Calibration only — same init/pool split and sigma check as simulate
+        # mode, minus the BO query loop. This is what the training pipeline
+        # runs automatically after every retrain (see refresh_calibration_plots).
+        label = f"{args.bo_acquisition}_{args.bo_surrogate}"
+        print(f"\n── Surrogate Calibration ({args.bo_surrogate}) ──")
+        cal = _compute_calibration(args.bo_surrogate, X_cv, y_raw, groups,
+                                   ck_params,
+                                   ranking_target=args.bo_ranking_target)
+        _print_calibration_report(cal)
         plot_calibration(cal, surrogate_name=args.bo_surrogate,
                          save_path=f"docs/bo_calibration_{label}.png")
 
@@ -1076,22 +1183,7 @@ def _run_evaluate(args):
     pool_idx = np.array(all_histories[0]["pool_indices"])
     first_surrogate.fit(X_cv[init_idx], y_raw[init_idx])
     cal = compute_surrogate_calibration(first_surrogate, X_cv[pool_idx], y_raw[pool_idx])
-
-    if "error" in cal:
-        print(f"  WARNING: {cal['error']}")
-    else:
-        print(f"  n_test={cal['n_valid']}, n_zero_sigma={cal['n_zero_sigma']}")
-        print(f"  z-score mean: {cal['mean_z']:+.3f}  (ideal:  0.000)")
-        print(f"  z-score std:  {cal['std_z']:.3f}   (ideal:  1.000)")
-        print(f"  Coverage within 1σ: {cal['fraction_within_1sigma']*100:.1f}%  "
-              f"(expected: 68.3%)")
-        print(f"  Coverage within 2σ: {cal['fraction_within_2sigma']*100:.1f}%  "
-              f"(expected: 95.4%)")
-        print(f"  Mean calibration error: {cal['calibration_error']:.4f}  "
-              f"(0 = perfect)")
-        if cal["calibration_error"] > 0.10:
-            print("  NOTE: calibration error > 0.10 — sigma estimates are "
-                  "unreliable. EI acquisition scores may be misleading.")
+    _print_calibration_report(cal)
     plot_calibration(cal, surrogate_name=args.bo_surrogate,
                      save_path=f"docs/bo_calibration_{label}.png")
 
@@ -2677,10 +2769,13 @@ if __name__ == "__main__":
     parser.add_argument("--bo", action="store_true",
                         help="Run Bayesian Optimization instead of classification pipeline")
     parser.add_argument("--bo-mode", type=str, default="simulate",
-                        choices=["simulate", "recommend", "batch",
+                        choices=["simulate", "calibrate", "recommend", "batch",
                                  "evaluate", "loco", "loco-evaluate",
                                  "learning-curve"],
-                        help="BO operating mode. evaluate=multi-seed per-cluster "
+                        help="BO operating mode. calibrate=sigma-calibration "
+                             "check + plot only (no BO loop; the training "
+                             "pipeline also runs this automatically after "
+                             "every retrain); evaluate=multi-seed per-cluster "
                              "metrics; loco=leave-one-cluster-out generalization; "
                              "loco-evaluate=multi-seed LOCO with mean±std error "
                              "bars; learning-curve=AF vs init fraction sweep")
