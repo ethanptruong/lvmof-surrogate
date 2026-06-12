@@ -14,9 +14,16 @@
 # Manual runs (Actions tab -> Run workflow):
 #   full    — fresh Optuna search on the latest data (default; several hours)
 #   refresh — keep current hyperparameters; re-featurize, re-fit and
-#             regenerate all figures (~1 h)
-#   resume  — continue a previous tuning run that hit the 6 h job limit
-#             (Optuna trial state is saved to the volume even on timeout)
+#             regenerate all figures (took ~4.8 h on the 2026-06 test run —
+#             the contrastive-learning net refits dominate on CPU)
+#   resume  — continue a previous tuning run that ran out of time
+#
+# A full tune does not fit in one 6 h job on CPU runners. When the training
+# step hits its time limit, progress (Optuna trials + featurized data) is
+# saved to the volume and the workflow DISPATCHES ITSELF in resume mode,
+# chaining until training completes (bounded by MAX_ATTEMPTS). A Friday-night
+# start may finish over the weekend; nothing is pushed to the live site until
+# a chain link succeeds end-to-end.
 #
 # Requires the FLY_API_TOKEN repo secret (shared with backup-data.yml).
 
@@ -32,10 +39,19 @@ on:
         type: choice
         options: [full, refresh, resume]
         default: full
+      attempt:
+        description: "Chain counter (used by self-dispatched resume runs — leave at 1)"
+        type: string
+        default: "1"
+
+permissions:
+  contents: read
+  actions: write
 
 env:
   FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
   APP: mof-compass
+  MAX_ATTEMPTS: 8
 
 jobs:
   guard:
@@ -103,9 +119,21 @@ jobs:
             /data/checkpoints/best_params.pkl checkpoints/best_params.pkl || true
           flyctl ssh sftp get -a "$APP" \
             /data/checkpoints/optuna.db checkpoints/optuna.db || true
+          # Resume runs also reuse the featurized-data caches saved by the
+          # interrupted run, skipping ~1 h of re-featurization per chain link.
+          if [ "${{ github.event.inputs.mode }}" = "resume" ]; then
+            flyctl ssh sftp get -a "$APP" \
+              /data/checkpoints/data.pkl checkpoints/data.pkl || true
+            flyctl ssh sftp get -a "$APP" \
+              /data/checkpoints/features.pkl checkpoints/features.pkl || true
+          fi
 
       - name: Run the training pipeline
         id: train
+        # The step gets cut at 320 min so the save/chain steps below still
+        # have room inside the job's 345 min ceiling.
+        timeout-minutes: 320
+        continue-on-error: true
         run: |
           MODE="${{ github.event.inputs.mode || 'full' }}"
           touch .retrain_marker && sleep 1
@@ -115,19 +143,47 @@ jobs:
             python main.py
           fi
 
-      # Even if the job times out mid-search, save the Optuna trial state so
-      # a "resume" run can pick up where it left off instead of starting over.
-      - name: Save tuning progress (always)
-        if: always() && steps.train.outcome != 'skipped'
+      # Training ran out of time (or failed): save the Optuna trial state and
+      # the featurized-data caches so a resume run picks up where this one
+      # stopped instead of starting over.
+      - name: Save tuning progress for resume
+        if: steps.train.outcome != 'success'
         run: |
-          if [ -f checkpoints/optuna.db ]; then
-            flyctl ssh console -a "$APP" -q -C "rm -f /data/checkpoints/optuna.db" || true
-            flyctl ssh sftp put -a "$APP" checkpoints/optuna.db /data/checkpoints/optuna.db || true
+          for f in optuna.db data.pkl features.pkl smiles_cache.pkl; do
+            if [ -f "checkpoints/$f" ]; then
+              flyctl ssh console -a "$APP" -q -C "rm -f /data/checkpoints/$f" || true
+              flyctl ssh sftp put -a "$APP" "checkpoints/$f" "/data/checkpoints/$f" || true
+            fi
+          done
+
+      - name: Chain a resume run
+        if: steps.train.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          if [ "$MODE" = "refresh" ]; then
+            echo "::error::Refresh run failed — nothing to resume (no tuning involved). Check the training log."
+            exit 1
+          fi
+          ATTEMPT="${{ github.event.inputs.attempt || '1' }}"
+          if [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; then
+            NEXT=$((ATTEMPT + 1))
+            echo "Training did not finish (attempt $ATTEMPT/$MAX_ATTEMPTS); dispatching resume run #$NEXT."
+            curl -sf -X POST \
+              -H "Authorization: token $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/workflows/quarterly-retrain.yml/dispatches" \
+              -d "{\"ref\":\"main\",\"inputs\":{\"mode\":\"resume\",\"attempt\":\"$NEXT\"}}"
+          else
+            echo "::error::Training still not finished after $ATTEMPT attempts — giving up. Investigate, then re-run manually in resume mode."
+            exit 1
           fi
 
       - name: Push new checkpoints to the live volume
+        if: steps.train.outcome == 'success'
         run: |
-          for f in best_params.pkl data.pkl features.pkl smiles_cache.pkl; do
+          for f in best_params.pkl optuna.db data.pkl features.pkl smiles_cache.pkl; do
             if [ -f "checkpoints/$f" ]; then
               flyctl ssh console -a "$APP" -q -C "rm -f /data/checkpoints/$f"
               flyctl ssh sftp put -a "$APP" "checkpoints/$f" "/data/checkpoints/$f"
@@ -135,6 +191,7 @@ jobs:
           done
 
       - name: Push regenerated figures and apply them to the running site
+        if: steps.train.outcome == 'success'
         run: |
           # Everything the pipeline (re)wrote at the project root this run.
           find . -maxdepth 1 \( -name '*.png' -o -name '*.csv' \) -newer .retrain_marker -print0 \
@@ -149,6 +206,7 @@ jobs:
           flyctl ssh console -a "$APP" -q -C "rm /data/artifacts.tar.gz"
 
       - name: Verify the site is still healthy
+        if: steps.train.outcome == 'success'
         run: |
           code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 https://mof-compass.fly.dev/_stcore/health)
           echo "health: HTTP $code"
