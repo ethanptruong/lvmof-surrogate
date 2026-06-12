@@ -1,0 +1,155 @@
+# Quarterly full retrain of the COMPASS surrogate model.
+#
+# Runs on GitHub's runners (4 CPU / 16 GB — faster than the Fly VM, and the
+# live site stays responsive while it works). Pulls the CURRENT experiment
+# Excel off the Fly volume, re-tunes every pipeline from scratch on it, then
+# pushes the new checkpoints and evaluation figures back. The running app
+# sees the new checkpoints immediately (they live on the volume); figures are
+# hot-copied into the app and re-applied on every boot by docker-entrypoint.sh.
+#
+# Schedule: first Friday evening (US Pacific) of Jan / Apr / Jul / Oct.
+# The cron fires every Saturday 04:00 UTC (= Fri 8 PM PST / 9 PM PDT) in
+# those months; the guard job lets only the month's first one through.
+#
+# Manual runs (Actions tab -> Run workflow):
+#   full    — fresh Optuna search on the latest data (default; several hours)
+#   refresh — keep current hyperparameters; re-featurize, re-fit and
+#             regenerate all figures (~1 h)
+#   resume  — continue a previous tuning run that hit the 6 h job limit
+#             (Optuna trial state is saved to the volume even on timeout)
+#
+# Requires the FLY_API_TOKEN repo secret (shared with backup-data.yml).
+
+name: Quarterly model retrain
+
+on:
+  schedule:
+    - cron: "0 4 * 1,4,7,10 6"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "full = fresh Optuna search; refresh = re-fit + plots only; resume = continue interrupted search"
+        type: choice
+        options: [full, refresh, resume]
+        default: full
+
+env:
+  FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+  APP: mof-compass
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        run: |
+          # Manual runs always proceed. Scheduled runs proceed only on the
+          # Saturday (UTC) right after the month's FIRST Friday (Pacific),
+          # i.e. UTC day-of-month 2-8.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "$(date -u +%-d)" -le 8 ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  retrain:
+    needs: guard
+    if: needs.guard.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (mirrors the Dockerfile)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+          pip install mordred==1.2.0 --no-deps
+          pip install filelock
+
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Wake the app machine
+        run: curl -s --max-time 120 https://mof-compass.fly.dev/_stcore/health || true
+
+      - name: Pull the latest lab data from the live volume
+        run: |
+          # The data dir (experiment Excel, COSMO solvent profiles, sigma
+          # profile index) is gitignored — the live volume is the source of
+          # truth. Grab the whole directory.
+          mkdir -p checkpoints
+          flyctl ssh console -a "$APP" -q -C "tar czf /tmp/labdata.tar.gz -C /data data"
+          flyctl ssh sftp get -a "$APP" /tmp/labdata.tar.gz labdata.tar.gz
+          flyctl ssh console -a "$APP" -q -C "rm /tmp/labdata.tar.gz"
+          tar xzf labdata.tar.gz && rm labdata.tar.gz
+          # SMILES featurization cache — keyed by molecule only, safe to
+          # reuse, saves a lot of mordred/COSMO time.
+          flyctl ssh sftp get -a "$APP" \
+            /data/checkpoints/smiles_cache.pkl checkpoints/smiles_cache.pkl || true
+          ls -la data | head -20
+
+      - name: Pull existing tuning state (refresh / resume only)
+        if: github.event.inputs.mode == 'refresh' || github.event.inputs.mode == 'resume'
+        run: |
+          flyctl ssh sftp get -a "$APP" \
+            /data/checkpoints/best_params.pkl checkpoints/best_params.pkl || true
+          flyctl ssh sftp get -a "$APP" \
+            /data/checkpoints/optuna.db checkpoints/optuna.db || true
+
+      - name: Run the training pipeline
+        id: train
+        run: |
+          MODE="${{ github.event.inputs.mode || 'full' }}"
+          touch .retrain_marker && sleep 1
+          if [ "$MODE" = "refresh" ]; then
+            python main.py --skip-tuning
+          else
+            python main.py
+          fi
+
+      # Even if the job times out mid-search, save the Optuna trial state so
+      # a "resume" run can pick up where it left off instead of starting over.
+      - name: Save tuning progress (always)
+        if: always() && steps.train.outcome != 'skipped'
+        run: |
+          if [ -f checkpoints/optuna.db ]; then
+            flyctl ssh console -a "$APP" -q -C "rm -f /data/checkpoints/optuna.db" || true
+            flyctl ssh sftp put -a "$APP" checkpoints/optuna.db /data/checkpoints/optuna.db || true
+          fi
+
+      - name: Push new checkpoints to the live volume
+        run: |
+          for f in best_params.pkl data.pkl features.pkl smiles_cache.pkl; do
+            if [ -f "checkpoints/$f" ]; then
+              flyctl ssh console -a "$APP" -q -C "rm -f /data/checkpoints/$f"
+              flyctl ssh sftp put -a "$APP" "checkpoints/$f" "/data/checkpoints/$f"
+            fi
+          done
+
+      - name: Push regenerated figures and apply them to the running site
+        run: |
+          # Everything the pipeline (re)wrote at the project root this run.
+          find . -maxdepth 1 \( -name '*.png' -o -name '*.csv' \) -newer .retrain_marker -print0 \
+            | tar czf artifacts.tar.gz --null -T -
+          tar tzf artifacts.tar.gz | head -50
+          flyctl ssh console -a "$APP" -q -C "rm -f /data/artifacts.tar.gz"
+          flyctl ssh sftp put -a "$APP" artifacts.tar.gz /data/artifacts.tar.gz
+          flyctl ssh console -a "$APP" -q -C "mkdir -p /data/artifacts"
+          flyctl ssh console -a "$APP" -q -C "tar xzf /data/artifacts.tar.gz -C /data/artifacts"
+          # Hot-apply to the running app (the entrypoint redoes this on boot).
+          flyctl ssh console -a "$APP" -q -C "cp -a /data/artifacts/. /app/"
+          flyctl ssh console -a "$APP" -q -C "rm /data/artifacts.tar.gz"
+
+      - name: Verify the site is still healthy
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 120 https://mof-compass.fly.dev/_stcore/health)
+          echo "health: HTTP $code"
+          test "$code" = "200"

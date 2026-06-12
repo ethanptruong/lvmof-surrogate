@@ -27,7 +27,9 @@ RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Then the project deps. Streamlit, filelock (cross-process Excel lock) and
 # pandas are runtime deps that aren't pinned in requirements.txt, so add them.
 COPY requirements.txt .
+# mordred must be --no-deps: it pins an ancient numpy (see install.sh).
 RUN pip install -r requirements.txt \
+    && pip install mordred==1.2.0 --no-deps \
     && pip install streamlit filelock pandas
 
 # App code + seed data (experiment Excel, COSMO solvent profiles, lab logo).

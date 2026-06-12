@@ -27,6 +27,14 @@ for d in data checkpoints docs; do
   ln -s "$VOL/$d" "/app/$d"
 done
 
+# Evaluation figures/CSVs (ROC, SHAP, confusion matrices, ...) are written to
+# the project root, which is the ephemeral image layer. Retrains persist them
+# to $VOL/artifacts; overlay those onto the baked-in copies at every boot so
+# the website always shows the latest model's plots.
+if [ -d "$VOL/artifacts" ]; then
+  cp -a "$VOL/artifacts/." /app/ 2>/dev/null || true
+fi
+
 exec streamlit run app/streamlit_app.py \
   --server.port "${PORT:-8501}" \
   --server.address 0.0.0.0 \
