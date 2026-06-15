@@ -34,6 +34,16 @@ jobs:
       - name: Install flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      # The machine uses auto_stop_machines = "suspend". An `flyctl ssh console`
+      # connection goes over WireGuard and does NOT trigger auto_start, so a
+      # suspended machine refuses SSH and the tarball step below fails. Hitting
+      # the HTTP health endpoint goes through Fly's proxy, which wakes the
+      # machine; the retries cover the ~1-2 min cold start before we SSH in.
+      - name: Wake the machine
+        run: |
+          curl -fsS --retry 8 --retry-all-errors --retry-delay 10 \
+            https://mof-compass.fly.dev/_stcore/health
+
       - name: Create tarball on the Fly machine
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
