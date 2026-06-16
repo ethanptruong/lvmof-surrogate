@@ -1,20 +1,20 @@
 """
-bo_core.py — Bayesian Optimization components for the LVMOF-Surrogate pipeline.
+bo_core.py - Bayesian Optimization components for the LVMOF-Surrogate pipeline.
 
 Classes:
-  SolventMixer           — COSMO property vectors for binary solvent mixtures
-  SearchSpace            — LHS candidate generation over continuous + discrete params
-  RegressionSurrogate    — wraps RF/XGB regressor, exposes (mu, sigma)
-  XGBoostBootstrapEnsemble — M bootstrap XGB regressors for uncertainty
-  OrdinalBOObjective     — raw 0-9 pxrd_score objective, LFBO label generation
-  EIAcquisition          — Expected Improvement
-  LFBOAcquisition        — LFBO-EI classifier (Song et al.)
-  _consensus_acquisition — EI ∩ LFBO rank-intersection; falls back to LFBO
-  ThompsonSamplingAcquisition — sample from RF tree ensemble
-  BatchSelector          — constant_liar and kriging_believer
-  CandidateFeaturizer    — fixed chemistry + process params → full feature matrix
-  BOLoop                 — simulation, recommendation, and batch modes
-  BOCheckpointer         — save/load BO state
+  SolventMixer           - COSMO property vectors for binary solvent mixtures
+  SearchSpace            - LHS candidate generation over continuous + discrete params
+  RegressionSurrogate    - wraps RF/XGB regressor, exposes (mu, sigma)
+  XGBoostBootstrapEnsemble - M bootstrap XGB regressors for uncertainty
+  OrdinalBOObjective     - raw 0-9 pxrd_score objective, LFBO label generation
+  EIAcquisition          - Expected Improvement
+  LFBOAcquisition        - LFBO-EI classifier (Song et al.)
+  _consensus_acquisition - EI ∩ LFBO rank-intersection; falls back to LFBO
+  ThompsonSamplingAcquisition - sample from RF tree ensemble
+  BatchSelector          - constant_liar and kriging_believer
+  CandidateFeaturizer    - fixed chemistry + process params → full feature matrix
+  BOLoop                 - simulation, recommendation, and batch modes
+  BOCheckpointer         - save/load BO state
 """
 
 import os
@@ -62,9 +62,9 @@ from cosmo_features import (
 )
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Phosphine-based stoichiometric ratio
-# ─────────────────────────────────────────────────────────────
+# ---
 def count_phosphines(smiles):
     """Count phosphorus atoms in a SMILES string.
 
@@ -92,7 +92,7 @@ def compute_stoichiometric_ratio(precursor_smi, linker_smi):
     ratio = P_count(linker) / P_count(precursor)
 
     If the linker has 4 phosphines and the precursor has 2, the ratio
-    is 2 — meaning 2 mol metal per 1 mol linker are needed to satisfy
+    is 2 - meaning 2 mol metal per 1 mol linker are needed to satisfy
     all phosphine binding sites.
 
     Returns the ratio (float), or None if either molecule has 0
@@ -105,9 +105,9 @@ def compute_stoichiometric_ratio(precursor_smi, linker_smi):
     return None
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # SolventMixer
-# ─────────────────────────────────────────────────────────────
+# ---
 class SolventMixer:
     """Compute COSMO property vectors for any binary solvent mixture.
 
@@ -205,16 +205,16 @@ class SolventMixer:
         return compositions
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Leakage-free chemistry groups for BO evaluation
-# ─────────────────────────────────────────────────────────────
+# ---
 
 def compute_chemistry_groups(df, linker_col="smiles_linker_1", min_group_size=20):
     """Assign each experiment a group label based on linker identity.
 
     Unlike the KMeans groups (which are fit on UMAP of the entire dataset
     and leak manifold structure), these groups are intrinsic to the
-    chemistry — they are deterministic properties of the molecule and
+    chemistry - they are deterministic properties of the molecule and
     require zero fitting.  This makes them leakage-free for BO init/pool
     splitting and evaluation.
 
@@ -223,15 +223,15 @@ def compute_chemistry_groups(df, linker_col="smiles_linker_1", min_group_size=20
     meaningful 30/70 split.
 
     Parameters
-    ----------
-    df : DataFrame — the masked experiment dataframe (rows match X_cv)
-    linker_col : str — column containing linker SMILES
-    min_group_size : int — groups smaller than this are merged
+    ---
+    df : DataFrame - the masked experiment dataframe (rows match X_cv)
+    linker_col : str - column containing linker SMILES
+    min_group_size : int - groups smaller than this are merged
 
     Returns
-    -------
-    groups : np.ndarray int (n,) — group labels starting from 0
-    group_names : list[str] — human-readable label for each group id
+    ---
+    groups : np.ndarray int (n,) - group labels starting from 0
+    group_names : list[str] - human-readable label for each group id
     """
     linker_ids, uniques = pd.factorize(df[linker_col].fillna("unknown"))
 
@@ -255,7 +255,7 @@ def compute_chemistry_groups(df, linker_col="smiles_linker_1", min_group_size=20
             group_names.append(f"rare ({n_rare} linkers)")
         else:
             smiles = str(uniques[uid])
-            short = smiles[:30] + "…" if len(smiles) > 30 else smiles
+            short = smiles[:30] + "..." if len(smiles) > 30 else smiles
             group_names.append(short)
 
     groups = np.asarray(final_ids, dtype=int)
@@ -269,9 +269,9 @@ def compute_chemistry_groups(df, linker_col="smiles_linker_1", min_group_size=20
     return groups, group_names
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # SearchSpace
-# ─────────────────────────────────────────────────────────────
+# ---
 class SearchSpace:
     """Generate candidate parameter sets: LHS over continuous params × solvent pairs.
 
@@ -321,7 +321,7 @@ class SearchSpace:
                 print(f"  [SearchSpace] WARNING: linker µmol bounds "
                       f"[{umol_lo:.1f},{umol_hi:.1f}] at V={total_volume_ml} mL "
                       f"are incompatible with data percentile bounds "
-                      f"[{pct_lo:.3g},{pct_hi:.3g}] — keeping µmol-derived bounds.")
+                      f"[{pct_lo:.3g},{pct_hi:.3g}] - keeping µmol-derived bounds.")
                 new_lo, new_hi = conc_lo_umol, conc_hi_umol
             if (new_lo, new_hi) != (pct_lo, pct_hi):
                 print(f"  [SearchSpace] linker_conc bounds tightened from "
@@ -386,8 +386,8 @@ class SearchSpace:
         process parameters; it is NOT fixed per solvent pair.
 
         Parameters
-        ----------
-        override_bounds : dict or None — param → (lo, hi) to use instead of
+        ---
+        override_bounds : dict or None - param → (lo, hi) to use instead of
             self.bounds (e.g. trust region bounds).  Any param not in
             override_bounds falls back to self.bounds.
         """
@@ -433,15 +433,15 @@ class SearchSpace:
         return pd.concat(all_candidates, ignore_index=True)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Tail-reweighted sample weights
-# ─────────────────────────────────────────────────────────────
+# ---
 def _compute_tail_weights(y, threshold=None, alpha=None, min_freq=None):
     """Inverse-frequency sample weights that up-weight rare high-y rows.
 
-    The raw pxrd_score distribution is skewed toward 0–3, but BO only cares
-    about distinguishing the 7–9 region.  Standard MSE regression lets the
-    0–3 mass dominate the loss; weighting tail rows by the inverse of their
+    The raw pxrd_score distribution is skewed toward 0-3, but BO only cares
+    about distinguishing the 7-9 region.  Standard MSE regression lets the
+    0-3 mass dominate the loss; weighting tail rows by the inverse of their
     frequency refocuses surrogate capacity on the crystallinity-hit region.
 
     Rows with y >= threshold are weighted by (1 / freq_of_their_bin) ** alpha.
@@ -449,12 +449,12 @@ def _compute_tail_weights(y, threshold=None, alpha=None, min_freq=None):
     mean is 1, preserving the effective learning-rate / regularization scale.
 
     Parameters
-    ----------
+    ---
     y : array-like of floats (raw pxrd_score, 0-9)
     threshold, alpha, min_freq : overrides for config defaults.
 
     Returns
-    -------
+    ---
     np.ndarray of sample weights, same length as y, mean ~ 1.
     """
     if threshold is None:
@@ -480,9 +480,9 @@ def _compute_tail_weights(y, threshold=None, alpha=None, min_freq=None):
     return w / mean_w
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # RegressionSurrogate
-# ─────────────────────────────────────────────────────────────
+# ---
 class RegressionSurrogate:
     """Wraps a fitted regression pipeline, exposes (mu, sigma) predictions.
 
@@ -490,7 +490,7 @@ class RegressionSurrogate:
     For XGB: uses XGBoostBootstrapEnsemble externally.
 
     Sigma calibration
-    -----------------
+    ---
     Raw inter-tree / bootstrap variance systematically underestimates true
     predictive uncertainty (captures epistemic but not aleatoric variance).
     On first fit, K-fold CV estimates a multiplicative scaling factor so that
@@ -515,7 +515,7 @@ class RegressionSurrogate:
         return _compute_tail_weights(y)
 
     def _regressor_step_name(self):
-        """Name of the final pipeline step — used to route sample_weight."""
+        """Name of the final pipeline step - used to route sample_weight."""
         return self.pipeline.steps[-1][0]
 
     def fit(self, X, y):
@@ -536,7 +536,7 @@ class RegressionSurrogate:
 
         return self
 
-    # ── sigma calibration ────────────────────────────────────────────────────
+    # -- sigma calibration ---
 
     def _calibrate_sigma(self, X, y, n_splits=5):
         """Compute sigma scaling factor via K-fold cross-validation.
@@ -634,7 +634,7 @@ class RegressionSurrogate:
             f"n={len(z_all)})"
         )
 
-    # ── core methods ─────────────────────────────────────────────────────────
+    # -- core methods ---
 
     def _get_regressor(self):
         """Extract the final regressor from the pipeline."""
@@ -704,7 +704,7 @@ class RankingRegressionSurrogate(RegressionSurrogate):
     def __init__(self, pipeline, model_type="rf"):
         super().__init__(pipeline, model_type)
         self._y_train_raw = None
-        # Rank normalization already flattens the 0–9 imbalance by mapping
+        # Rank normalization already flattens the 0-9 imbalance by mapping
         # targets to uniform [0, 1].  Applying a raw-y tail threshold on top
         # would double-penalize and use a meaningless cutoff in rank space.
         self.use_tail_weights = False
@@ -837,9 +837,9 @@ class RankingRegressionSurrogate(RegressionSurrogate):
         return float(np.clip(frac, 0.0, 1.0))
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # XGBoostBootstrapEnsemble
-# ─────────────────────────────────────────────────────────────
+# ---
 class XGBoostBootstrapEnsemble:
     """M bootstrap XGBoost regressors for uncertainty estimation.
 
@@ -882,9 +882,9 @@ class XGBoostBootstrapEnsemble:
         return preds.mean(axis=0), preds.std(axis=0)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # OrdinalBOObjective
-# ─────────────────────────────────────────────────────────────
+# ---
 class OrdinalBOObjective:
     """Raw 0-9 pxrd_score as BO objective + LFBO label generation."""
 
@@ -923,9 +923,9 @@ class OrdinalBOObjective:
         return labels.sum() == 0 or labels.sum() == len(labels)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Acquisition Functions
-# ─────────────────────────────────────────────────────────────
+# ---
 class EIAcquisition:
     """Expected Improvement using regression surrogate mean/variance."""
 
@@ -976,7 +976,7 @@ class LFBOAcquisition:
         )
         self.fallback_ei = EIAcquisition()
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+    # -- helpers ---
 
     def _gamma_t(self, n_observed):
         """Anneal gamma from gamma_init toward 0.10 as observations grow."""
@@ -985,7 +985,7 @@ class LFBOAcquisition:
         # Smooth decay: starts at gamma_init, approaches 0.10 after ~100 obs.
         return max(0.10, self.gamma_init / (1.0 + n_observed / 50.0))
 
-    # ── main ──────────────────────────────────────────────────────────────────
+    # -- main ---
 
     def score(self, X_observed, y_observed, X_candidates, surrogate=None):
         """Return acquisition values for candidates.
@@ -1017,14 +1017,14 @@ class LFBOSSLAcquisition(LFBOAcquisition):
     """LFBO-SSL: surrogate-pseudo-labelled extension of LFBO-EI.
 
     Standard LFBO trains a classifier on the n_observed labelled rows only.
-    With small init sets (~10–30 syntheses) this leaves the classifier
+    With small init sets (~10-30 syntheses) this leaves the classifier
     chronically data-starved.  LFBO-SSL augments the classifier's training
     set by pseudo-labelling every unevaluated pool candidate with the
     regression surrogate's prediction, weighted by surrogate uncertainty so
     confident predictions pull harder.
 
     Pseudo-label scheme
-    -------------------
+    ---
     For each candidate j in the pool:
       mu_j, sigma_j = surrogate.predict(x_j)
       pseudo_label_j = 1 if mu_j >= tau else 0
@@ -1035,8 +1035,8 @@ class LFBOSSLAcquisition(LFBOAcquisition):
       the observed-positive mean weight.
 
     Defensibility notes
-    -------------------
-    * Pseudo weights default to 0.3 — observed labels dominate.  A sweep over
+    ---
+    * Pseudo weights default to 0.3 - observed labels dominate.  A sweep over
       {0.1, 0.3, 0.5, 1.0} should be reported alongside any headline result.
     * Sigma calibration on the surrogate (RegressionSurrogate._calibrate_sigma)
       is load-bearing: poorly-calibrated sigma makes the SSL weighting noise.
@@ -1187,9 +1187,9 @@ class ThompsonSamplingAcquisition:
             return reg.predict(Xt)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # BatchSelector
-# ─────────────────────────────────────────────────────────────
+# ---
 class BatchSelector:
     """Batch selection via Constant Liar, Kriging Believer, or Diverse Greedy."""
 
@@ -1227,14 +1227,14 @@ class BatchSelector:
             dist    = 0.5 * proc_d + 0.5 * sol_d
 
         Parameters
-        ----------
+        ---
         diversity_lambda : float in [0, 1]
             Weight on diversity vs. acquisition quality.
             0 = pure acquisition (same as argmax), 1 = pure diversity.
             Default 0.3 gives quality-first with meaningful spread.
 
         Returns
-        -------
+        ---
         selected_indices : list[int]  length batch_size
         combined_scores  : np.ndarray  length len(candidates_df), combined score
                            for selected members; nan for non-selected candidates.
@@ -1508,9 +1508,9 @@ def _consensus_acquisition(
     return combined
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # CandidateFeaturizer
-# ─────────────────────────────────────────────────────────────
+# ---
 class CandidateFeaturizer:
     """Convert BO knobs → full X_cv-compatible feature matrix.
 
@@ -1519,11 +1519,11 @@ class CandidateFeaturizer:
     the variance threshold.
 
     Handles four categories of derived features:
-      1. Process knobs  — proc_raw:X (raw) + proc:X (MinMax-normalised)
-      2. Solvent fractions — proc_raw/proc solvent_1/2_fraction from phi_1
-      3. Concentration cols — total_conc / metal_conc / mod_conc / umol_* from linker_conc + ratio + equiv
-      4. COSMO features   — computed on-the-fly via CosmoMixer from (sol1, sol2, phi_1)
-      5. Interaction terms — recomputed from updated normalised process values
+      1. Process knobs  - proc_raw:X (raw) + proc:X (MinMax-normalised)
+      2. Solvent fractions - proc_raw/proc solvent_1/2_fraction from phi_1
+      3. Concentration cols - total_conc / metal_conc / mod_conc / umol_* from linker_conc + ratio + equiv
+      4. COSMO features   - computed on-the-fly via CosmoMixer from (sol1, sol2, phi_1)
+      5. Interaction terms - recomputed from updated normalised process values
     """
 
     def __init__(
@@ -1558,7 +1558,7 @@ class CandidateFeaturizer:
                     float(np.nanmax(col_vals)),
                 )
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+    # -- helpers ---
 
     def _norm(self, col: str, raw_val) -> float:
         """MinMax-normalise raw_val using training scale for this column."""
@@ -1590,21 +1590,21 @@ class CandidateFeaturizer:
         self._set(X, f"proc_raw:{col}", raw_vals)
         self._set(X, f"proc:{col}", self._norm_arr(col, raw_vals))
 
-    # ── main ──────────────────────────────────────────────────────────────────
+    # -- main ---
 
     def featurize(self, candidates_df: pd.DataFrame) -> np.ndarray:
         """Return full feature matrix (n_candidates × n_features)."""
         n = len(candidates_df)
         X = np.tile(self.template_row, (n, 1))
 
-        # ── 1. Scalar process knobs ───────────────────────────────────────────
+        # -- 1. Scalar process knobs ---
         for col in BO_CONTROLLABLE_PARAMS:
             if col in ("phi_1",):
                 continue   # handled separately below
             if col in candidates_df.columns:
                 self._set_proc(X, col, candidates_df[col].values.astype(float))
 
-        # ── 1a. metal_over_linker_ratio (BO_OPTIONAL_PARAMS, not in the loop) ──
+        # -- 1a. metal_over_linker_ratio (BO_OPTIONAL_PARAMS, not in the loop) --
         # Always write the ratio into proc:/proc_raw: slots when present in
         # candidates_df.  This covers both --bo-include-mlr (LHS-sampled ratio)
         # and fixed-chemistry mode (ratio broadcast to a stoichiometric scalar
@@ -1617,11 +1617,11 @@ class CandidateFeaturizer:
                 candidates_df["metal_over_linker_ratio"].values.astype(float),
             )
 
-        # ── 1b. Fix total_solvent_volume_ml to the configured synthesis volume ──
+        # -- 1b. Fix total_solvent_volume_ml to the configured synthesis volume --
         self._set_proc(X, "total_solvent_volume_ml",
                        np.full(n, self.total_volume_ml))
 
-        # ── 2. phi_1 → solvent fractions ─────────────────────────────────────
+        # -- 2. phi_1 → solvent fractions ---
         # Force pure-solvent_1 fractions when solvent_2 is missing so the
         # process features stay consistent with the COSMO mixer (which treats
         # an empty solvent_2 as pure sol1 regardless of phi_1).  Without this
@@ -1648,7 +1648,7 @@ class CandidateFeaturizer:
         # value the surrogate sees agrees with the fraction columns.
         phi_1 = phi_1_eff
 
-        # ── 3. Derive concentration cols from linker_conc + ratio + equiv ──���──
+        # -- 3. Derive concentration cols from linker_conc + ratio + equiv --���--
         if "linker_conc" in candidates_df.columns:
             linker_conc = candidates_df["linker_conc"].values.astype(float)
             ratio = candidates_df.get(
@@ -1681,7 +1681,7 @@ class CandidateFeaturizer:
             ]:
                 self._set_proc(X, col, vals)
 
-        # ── 4. COSMO features from (sol1, sol2, phi_1) ───────────────────────
+        # -- 4. COSMO features from (sol1, sol2, phi_1) ---
         if self.cosmo_mixer is not None and "solvent_1" in candidates_df.columns:
             sol1_arr = candidates_df["solvent_1"].values
             sol2_arr = candidates_df.get(
@@ -1694,7 +1694,7 @@ class CandidateFeaturizer:
                     if np.isfinite(val):
                         self._set_proc(X[i:i+1], col, np.array([val]))
 
-        # ── 5. Recompute interaction features ─────────────────────────────────
+        # -- 5. Recompute interaction features ---
         # Gather normalised values for the three terms involved
         def _get_norm(col):
             if col in candidates_df.columns:
@@ -1756,12 +1756,12 @@ class FeasibilityScorer:
         """Return per-candidate feasibility score in [0, 1].
 
         Parameters
-        ----------
-        candidates_df : DataFrame — must have "temperature_k" and "solvent_1" columns.
+        ---
+        candidates_df : DataFrame - must have "temperature_k" and "solvent_1" columns.
 
         Returns
-        -------
-        feasibility : ndarray shape (n,) — 1.0 = feasible, 0.0 = infeasible.
+        ---
+        feasibility : ndarray shape (n,) - 1.0 = feasible, 0.0 = infeasible.
         """
         n = len(candidates_df)
         feasibility = np.ones(n)
@@ -1784,15 +1784,15 @@ class FeasibilityScorer:
         return np.clip(feasibility, 0.0, 1.0)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # NeighborhoodTemplateSelector
-# ─────────────────────────────────────────────────────────────
+# ---
 class NeighborhoodTemplateSelector:
     """Find structurally similar past experiments to seed a trust region center.
 
     Two-stage similarity pipeline
-    ------------------------------
-    Stage 1 — Morgan fingerprint (ECFP4) Tanimoto on linker + precursor SMILES.
+    ---
+    Stage 1 - Morgan fingerprint (ECFP4) Tanimoto on linker + precursor SMILES.
       Fast initial lookup.  Used to find the single nearest-neighbor experiment
       whose full feature row becomes the chemistry reference vector, and to
       provide a fallback similarity score when the chemistry feature matrix
@@ -1802,13 +1802,13 @@ class NeighborhoodTemplateSelector:
       difference, so a C-triphos and Si-triphos will score low even though they
       are topologically analogous.
 
-    Stage 2 — Chemistry feature cosine similarity on X_cv (surrogate features).
+    Stage 2 - Chemistry feature cosine similarity on X_cv (surrogate features).
       Restricts X_cv to chemistry-only columns (excludes Process / Interaction /
       Unknown groups) and computes L2-normalised cosine similarity between the
       nearest-neighbor row from Stage 1 and every other experiment.
 
       Why this is better for linker comparison:
-        • TTP features encode hub element, arm type, arm length, topicity — so a
+        • TTP features encode hub element, arm type, arm length, topicity - so a
           Si-triphos and C-triphos with the same arm structure score high.
         • G14 features explicitly encode Si/Ge/Sn hub presence and geometry.
         • ChemBERTa embeddings capture learned chemical context (element-aware).
@@ -1841,7 +1841,7 @@ class NeighborhoodTemplateSelector:
     # Modulator-descriptor blocks are excluded from the chemistry similarity
     # because modulator presence is a process decision (you choose whether to
     # add it during synthesis). Including them caused same-linker/precursor
-    # rows with different modulator usage to land far apart in cosine space —
+    # rows with different modulator usage to land far apart in cosine space -
     # the Mordred RAC block for the modulator scales with equivalents and can
     # reach magnitudes ~1e4, dominating the cosine. Stage-1 Morgan FP already
     # represents modulator chemistry separately with weight=0.10.
@@ -1878,35 +1878,35 @@ class NeighborhoodTemplateSelector:
     ):
         """
         Parameters
-        ----------
-        df_train             : DataFrame — training experiments (rows match X_cv)
-        X_cv                 : ndarray (n, d) — full feature matrix from checkpoint
-        X_groups             : list[str] len d — feature group labels per column
-        linker_col           : str — SMILES column for the linker in df_train
-        precursor_col        : str — SMILES column for the precursor in df_train
-        modulator_col        : str — SMILES column for the modulator in df_train
-        score_col            : str — outcome column
-        fp_blend             : float in [0,1] — weight given to Morgan FP similarity
+        ---
+        df_train             : DataFrame - training experiments (rows match X_cv)
+        X_cv                 : ndarray (n, d) - full feature matrix from checkpoint
+        X_groups             : list[str] len d - feature group labels per column
+        linker_col           : str - SMILES column for the linker in df_train
+        precursor_col        : str - SMILES column for the precursor in df_train
+        modulator_col        : str - SMILES column for the modulator in df_train
+        score_col            : str - outcome column
+        fp_blend             : float in [0,1] - weight given to Morgan FP similarity
                                vs chemistry feature cosine similarity (default 0.3).
                                Lower = trust the surrogate features more.
-        linker_weight        : float — weight for linker in FP similarity (default 0.35)
-        precursor_weight     : float — weight for precursor in FP similarity (default 0.55).
+        linker_weight        : float - weight for linker in FP similarity (default 0.35)
+        precursor_weight     : float - weight for precursor in FP similarity (default 0.55).
                                Higher than linker weight because metal identity
                                is the dominant determinant of MOF assembly
                                conditions (T, conc, equiv transfer poorly across
                                metals but well across linkers for a fixed metal).
-        modulator_weight     : float — weight for modulator in FP similarity (default 0.10).
+        modulator_weight     : float - weight for modulator in FP similarity (default 0.10).
                                Only applied when a target modulator SMILES is provided.
                                Weights are renormalized when modulator is absent.
-        top_k                : int — number of neighbors to return
-        min_similarity       : float — minimum combined similarity to include
-        fp_radius            : int — Morgan FP radius (2 = ECFP4)
-        fp_nbits             : int — Morgan FP bit vector length
-        success_threshold    : int — minimum pxrd_score to count as a "success"
+        top_k                : int - number of neighbors to return
+        min_similarity       : float - minimum combined similarity to include
+        fp_radius            : int - Morgan FP radius (2 = ECFP4)
+        fp_nbits             : int - Morgan FP bit vector length
+        success_threshold    : int - minimum pxrd_score to count as a "success"
                                for center computation (default 5). Only successes
                                anchor the trust region center; all hub-matched
                                experiments inform the spread.
-        hub_strat_threshold  : float — mean pairwise FP similarity threshold above
+        hub_strat_threshold  : float - mean pairwise FP similarity threshold above
                                which hub-element stratification is triggered
                                (default 0.85). When neighbors are nearly identical
                                by fingerprint, hub atom becomes the discriminator.
@@ -1929,7 +1929,7 @@ class NeighborhoodTemplateSelector:
         self.success_threshold   = success_threshold
         self.hub_strat_threshold = hub_strat_threshold
 
-        # ── Stage 1: pre-compute Morgan fingerprints ──────────────────────────
+        # -- Stage 1: pre-compute Morgan fingerprints ---
         self._linker_fps    = [self._to_fp(s) for s in
                                df_train[linker_col].fillna("")]
         self._precursor_fps = [self._to_fp(s) for s in
@@ -1939,7 +1939,7 @@ class NeighborhoodTemplateSelector:
                         else pd.Series([""] * len(df_train)))
         self._modulator_fps = [self._to_fp(s) for s in mod_col_data]
 
-        # ── Hub element pre-computation ────────────────────────────────────────
+        # -- Hub element pre-computation ---
         self._hub_elements = [
             self._detect_hub(s) for s in df_train[linker_col].fillna("")
         ]
@@ -1949,7 +1949,7 @@ class NeighborhoodTemplateSelector:
         print(f"[NeighborhoodTemplate] Hub distribution in training data: "
               + ", ".join(f"{k}={v}" for k, v in sorted(hub_counts.items())))
 
-        # ── Stage 2: build L2-normalised chemistry feature matrix ─────────────
+        # -- Stage 2: build L2-normalised chemistry feature matrix ---
         # Exclude process / interaction / unknown columns so similarity is
         # purely about molecular chemistry, not about what conditions were used.
         chem_mask = np.array([g not in self._PROCESS_GROUPS
@@ -1966,7 +1966,7 @@ class NeighborhoodTemplateSelector:
         self._X_chem_normed = X_chem / norms   # shape (n, n_chem)
         self._chem_mask = chem_mask
 
-    # ── helpers ───────────────────────────────────────────────────────────────
+    # -- helpers ---
 
     def _to_fp(self, smiles):
         try:
@@ -2061,28 +2061,28 @@ class NeighborhoodTemplateSelector:
                 count += 1
         return total / count if count > 0 else 0.0
 
-    # ── main ──────────────────────────────────────────────────────────────────
+    # -- main ---
 
     def select(self, target_linker_smiles, target_precursor_smiles,
                search_bounds, target_modulator_smiles=None):
         """Find similar experiments and return weighted process center + spread.
 
         Parameters
-        ----------
-        target_linker_smiles    : str — SMILES of the target linker
-        target_precursor_smiles : str — SMILES of the target precursor
-        search_bounds           : dict — param → (lo, hi) from SearchSpace.bounds
-        target_modulator_smiles : str or None — SMILES of the modulator (optional).
+        ---
+        target_linker_smiles    : str - SMILES of the target linker
+        target_precursor_smiles : str - SMILES of the target precursor
+        search_bounds           : dict - param → (lo, hi) from SearchSpace.bounds
+        target_modulator_smiles : str or None - SMILES of the modulator (optional).
                                   When provided, modulator Tanimoto similarity
                                   is included in the neighbor search with weight
                                   self.modulator_weight.
 
         Returns
-        -------
-        center      : dict — param → weighted-mean process condition value
-        spread      : dict — param → weighted std (seeds trust region radius)
-        neighbors   : DataFrame — top-k neighbors with similarity scores
-        ref_idx     : int — dataset index of nearest-neighbor (chemistry template)
+        ---
+        center      : dict - param → weighted-mean process condition value
+        spread      : dict - param → weighted std (seeds trust region radius)
+        neighbors   : DataFrame - top-k neighbors with similarity scores
+        ref_idx     : int - dataset index of nearest-neighbor (chemistry template)
         """
         tgt_linker_fp    = self._to_fp(target_linker_smiles)
         tgt_precursor_fp = self._to_fp(target_precursor_smiles)
@@ -2143,7 +2143,7 @@ class NeighborhoodTemplateSelector:
         sim_df = sim_df.nlargest(self.top_k, "combined_sim").copy()
         sim_df["hub_elem"] = [self._hub_elements[i] for i in sim_df.index]
 
-        # ── Hub element stratification (auto-triggered) ────────────────────────
+        # -- Hub element stratification (auto-triggered) ---
         # When all top-k neighbors look nearly identical by Morgan FP (typical
         # for phosphine linker datasets where only the hub atom changes), FP
         # similarity can no longer discriminate hub types.  We detect this by
@@ -2165,7 +2165,7 @@ class NeighborhoodTemplateSelector:
             else:
                 print(f"[NeighborhoodTemplate] Hub stratification triggered "
                       f"(mean_pair_fp={mean_pair_sim:.3f}) but only "
-                      f"{len(hub_matched)} {target_hub}-hub experiments found — "
+                      f"{len(hub_matched)} {target_hub}-hub experiments found - "
                       "falling back to all neighbors")
                 hub_matched = sim_df
                 spread_pool = sim_df
@@ -2175,7 +2175,7 @@ class NeighborhoodTemplateSelector:
             hub_matched = sim_df
             spread_pool = sim_df
 
-        # ── Success-only center ────────────────────────────────────────────────
+        # -- Success-only center ---
         # Anchor the trust region center only on successful experiments
         # (score >= success_threshold) to avoid pulling the starting point
         # toward failure conditions.  All hub-matched experiments inform the
@@ -2189,10 +2189,10 @@ class NeighborhoodTemplateSelector:
                   f"{len(success_pool)} successes (score≥{self.success_threshold})")
         else:
             center_pool = hub_matched
-            print(f"[NeighborhoodTemplate] Fewer than 2 successes found — "
+            print(f"[NeighborhoodTemplate] Fewer than 2 successes found - "
                   "using all hub-matched neighbors for center")
 
-        # ── Weighted center (success pool) and spread (full hub pool) ──────────
+        # -- Weighted center (success pool) and spread (full hub pool) ---
         center_pool = center_pool.copy()
         center_pool["weight"] = (
             center_pool["combined_sim"] * (center_pool["score"] + 1.0)
@@ -2216,8 +2216,8 @@ class NeighborhoodTemplateSelector:
 
         print(
             f"[NeighborhoodTemplate] {len(sim_df)} neighbors | "
-            f"fp_sim {sim_df['fp_sim'].min():.2f}–{sim_df['fp_sim'].max():.2f} | "
-            f"feat_sim {sim_df['feat_sim'].min():.2f}–"
+            f"fp_sim {sim_df['fp_sim'].min():.2f}-{sim_df['fp_sim'].max():.2f} | "
+            f"feat_sim {sim_df['feat_sim'].min():.2f}-"
             f"{sim_df['feat_sim'].max():.2f}"
         )
         print("[NeighborhoodTemplate] Process center: "
@@ -2226,9 +2226,9 @@ class NeighborhoodTemplateSelector:
         return center, spread, sim_df, ref_idx
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # TrustRegion
-# ─────────────────────────────────────────────────────────────
+# ---
 class TrustRegion:
     """TuRBO-style adaptive trust region for recommend mode.
 
@@ -2240,7 +2240,7 @@ class TrustRegion:
     as a symmetric fraction of the full parameter range, not using GP
     lengthscales.  The success/failure counter rule follows TuRBO directly.
 
-    Reference: Eriksson et al. (2019) NeurIPS — "Scalable Global Optimization
+    Reference: Eriksson et al. (2019) NeurIPS - "Scalable Global Optimization
     via Local Bayesian Optimization."  arXiv:1910.01739.
     """
 
@@ -2257,14 +2257,14 @@ class TrustRegion:
     ):
         """
         Parameters
-        ----------
-        center      : dict — param → initial center value
-        full_bounds : dict — param → (lo, hi) global bounds from SearchSpace
-        length      : float — initial TR length as fraction of full range [0,1]
-        length_min  : float — restart threshold
-        length_max  : float — maximum allowed length
-        success_tol : int   — consecutive successes before expanding
-        failure_tol : int   — consecutive failures before shrinking
+        ---
+        center      : dict - param → initial center value
+        full_bounds : dict - param → (lo, hi) global bounds from SearchSpace
+        length      : float - initial TR length as fraction of full range [0,1]
+        length_min  : float - restart threshold
+        length_max  : float - maximum allowed length
+        success_tol : int   - consecutive successes before expanding
+        failure_tol : int   - consecutive failures before shrinking
         """
         self.center      = dict(center)
         self.full_bounds = dict(full_bounds)
@@ -2307,7 +2307,7 @@ class TrustRegion:
             print(f"[TrustRegion] Shrunk    → length={self.length:.3f}  "
                   f"(best={self._best_score:.1f})")
             if self.length < self.length_min:
-                print("[TrustRegion] Below minimum — resetting length to 0.8.")
+                print("[TrustRegion] Below minimum - resetting length to 0.8.")
                 self.length = 0.8
 
     def recenter(self, new_center):
@@ -2368,9 +2368,9 @@ class TrustRegion:
         return tr
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # BOCheckpointer
-# ─────────────────────────────────────────────────────────────
+# ---
 class BOCheckpointer:
     """Save/load BO state (iteration, history, selected indices)."""
 
@@ -2391,11 +2391,11 @@ class BOCheckpointer:
         return None
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # BOLoop
-# ─────────────────────────────────────────────────────────────
+# ---
 # Acquisition → batch strategy compatibility
-# ─────────────────────────────────────────────────────────────
+# ---
 #
 # Constant Liar (CL) and Kriging Believer (KB) work by hallucinating an
 # observation at each selected point and refitting the regression surrogate.
@@ -2418,9 +2418,9 @@ class BOCheckpointer:
 # optimum region more aggressively (later in the campaign).
 #
 # References:
-#   Ginsbourger et al. (2010) — CL/KB for parallel BO
-#   Oliveira, Tiao & Ramos (NeurIPS 2022) — CL/KB failure with BORE
-#   Kandasamy et al. (AISTATS 2018) — parallel Thompson Sampling
+#   Ginsbourger et al. (2010) - CL/KB for parallel BO
+#   Oliveira, Tiao & Ramos (NeurIPS 2022) - CL/KB failure with BORE
+#   Kandasamy et al. (AISTATS 2018) - parallel Thompson Sampling
 
 # Valid batch strategies per acquisition function.
 VALID_BATCH_STRATEGIES = {
@@ -2470,7 +2470,7 @@ def resolve_batch_strategy(acquisition_name, requested_strategy=None):
 def make_init_pool_split(X, y_raw, init_fraction=BO_INIT_FRACTION,
                          groups=None, random_state=RANDOM_STATE):
     """Stratified init/pool split used by BO simulation AND the standalone
-    calibration mode — keeping them identical means a calibration-only run
+    calibration mode - keeping them identical means a calibration-only run
     reproduces exactly the split a simulate run would evaluate on.
 
     When chemistry groups are available, take init_fraction of EACH cluster
@@ -2478,7 +2478,7 @@ def make_init_pool_split(X, y_raw, init_fraction=BO_INIT_FRACTION,
     every chemistry family is represented in the initial training set while
     holding back the rest of each cluster as the oracle pool.
 
-    Why not GroupShuffleSplit (entire clusters in/out)?  Too extreme — the
+    Why not GroupShuffleSplit (entire clusters in/out)?  Too extreme - the
     surrogate has zero signal from pool clusters, making generalisation
     unrealistically hard.  The per-cluster split mirrors the real lab
     situation: you have done some experiments with each linker type and
@@ -2503,7 +2503,7 @@ def make_init_pool_split(X, y_raw, init_fraction=BO_INIT_FRACTION,
         for cid in range(n_clusters):
             c_idx = np.where(groups == cid)[0]
             if len(c_idx) < 2:
-                # Cluster too small to split — put entirely in init
+                # Cluster too small to split - put entirely in init
                 init_list.extend(c_idx.tolist())
                 continue
             y_c = y_binned[c_idx]
@@ -2514,7 +2514,7 @@ def make_init_pool_split(X, y_raw, init_fraction=BO_INIT_FRACTION,
                 )
                 i_init, i_pool = next(sss_c.split(c_idx, y_c))
             except ValueError:
-                # Score stratification failed — random split within cluster
+                # Score stratification failed - random split within cluster
                 rng_c = np.random.RandomState(random_state + cid)
                 perm = rng_c.permutation(len(c_idx))
                 n_init = max(1, int(len(c_idx) * init_fraction))
@@ -2541,7 +2541,7 @@ def make_init_pool_split(X, y_raw, init_fraction=BO_INIT_FRACTION,
             random_state=random_state
         )
         init_idx, pool_idx = next(sss.split(X, y_binned))
-        print("[BO simulation] No chemistry groups — using score-stratified split.")
+        print("[BO simulation] No chemistry groups - using score-stratified split.")
 
     return init_idx, pool_idx, groups, n_clusters
 
@@ -2592,11 +2592,11 @@ class BOLoop:
         """Sequential BO with oracle pool.
 
         Parameters
-        ----------
-        X : array-like, shape (n, d) — full feature matrix
-        y_raw : array-like, shape (n,) — raw 0-9 pxrd_score
-        init_fraction : float — fraction for initial training set
-        groups : array-like int (n,), optional — KMeans chemistry cluster labels.
+        ---
+        X : array-like, shape (n, d) - full feature matrix
+        y_raw : array-like, shape (n,) - raw 0-9 pxrd_score
+        init_fraction : float - fraction for initial training set
+        groups : array-like int (n,), optional - KMeans chemistry cluster labels.
             When provided, two things happen:
             1. Init split is stratified by (score, cluster) jointly, guaranteeing
                every chemistry cluster appears in the initial training set.  This
@@ -2606,11 +2606,11 @@ class BOLoop:
                iteration, discouraging consecutive selections from the same cluster.
                Penalty: acq *= 1 / (1 + lambda * excess_selections / expected)
                where excess = max(0, actual - expected_per_cluster).
-        cluster_div_lambda : float — strength of diversity penalty (default 2.0).
+        cluster_div_lambda : float - strength of diversity penalty (default 2.0).
             0 disables it; higher values push more aggressively toward unexplored clusters.
 
         Returns
-        -------
+        ---
         history : dict with keys 'iterations', 'best_so_far', 'selected_indices',
                   'y_selected', 'init_indices', 'pool_indices'
         """
@@ -2626,7 +2626,7 @@ class BOLoop:
                               groups=groups, n_clusters=n_clusters,
                               cluster_div_lambda=cluster_div_lambda)
 
-    # ── Core BO loop (shared by run_simulation and run_simulation_loco) ────
+    # -- Core BO loop (shared by run_simulation and run_simulation_loco) ----
 
     def _run_loop(self, X, y_raw, init_idx, pool_idx, *,
                   groups=None, n_clusters=None, cluster_div_lambda=0.0,
@@ -2634,7 +2634,7 @@ class BOLoop:
         """Execute the sequential BO loop given pre-computed init/pool splits.
 
         Parameters
-        ----------
+        ---
         X, y_raw          : full feature matrix and raw scores
         init_idx, pool_idx: integer arrays of global indices
         groups             : optional cluster labels (int array, len n)
@@ -2749,8 +2749,8 @@ class BOLoop:
         a single cluster).
 
         Parameters
-        ----------
-        max_pool_frac : float — cap iterations at this fraction of the pool
+        ---
+        max_pool_frac : float - cap iterations at this fraction of the pool
             size so that small clusters are evaluated under the same budget
             pressure as large ones (default 0.30 = match the 30/70 split).
             Without this, a cluster of 25 experiments tested over 50 iterations
@@ -2907,14 +2907,14 @@ class BOLoop:
         """One-shot ranking for fixed chemistry.
 
         Parameters
-        ----------
-        X_train : array — full training feature matrix
-        y_train : array — raw 0-9 scores
-        candidates_df : DataFrame — candidate process params (from SearchSpace)
-        candidate_features : array — featurized candidates (from CandidateFeaturizer)
+        ---
+        X_train : array - full training feature matrix
+        y_train : array - raw 0-9 scores
+        candidates_df : DataFrame - candidate process params (from SearchSpace)
+        candidate_features : array - featurized candidates (from CandidateFeaturizer)
 
         Returns
-        -------
+        ---
         results_df : DataFrame with columns for params + predictions + acquisition
         """
         # Fit surrogate

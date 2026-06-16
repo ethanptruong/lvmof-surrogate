@@ -60,13 +60,13 @@ def _stream_until_done(status: bo_runner.RunStatus, *, max_seconds: int = 6 * 60
     st.caption(f"Elapsed: {status.elapsed_seconds:.0f} s")
 
 
-# ── Simulate vs Evaluate ─────────────────────────────────────────────────────
+# -- Simulate vs Evaluate ---
 st.subheader("Benchmark the BO loop")
 st.markdown(
-    "- **Simulate** — single random seed, fast. Produces convergence, "
+    "- **Simulate** - single random seed, fast. Produces convergence, "
     "top-k, simple-regret, and surrogate calibration plots in `docs/`. "
     "Use this to eyeball a specific surrogate/acquisition combo.\n"
-    "- **Evaluate** — same loop, but repeated over N seeds with per "
+    "- **Evaluate** - same loop, but repeated over N seeds with per "
     "chemistry-cluster AF/EF/hit-rate reported as mean ± std. Slower "
     "(roughly N× a single simulate) but gives statistically meaningful "
     "comparisons between configurations."
@@ -137,7 +137,7 @@ with eval_tab:
 
 st.divider()
 
-# ── Reset BO state ───────────────────────────────────────────────────────────
+# -- Reset BO state ---
 st.subheader("Reset BO recommend state")
 st.caption("Deletes `checkpoints/recommend_state.pkl` so the iteration counter "
            "starts at 0. Existing experiment data is **not** touched.")
@@ -150,7 +150,7 @@ if st.button("Reset BO state", type="secondary", disabled=(typed != "RESET")):
 
 st.divider()
 
-# ── Checkpoint inventory ─────────────────────────────────────────────────────
+# -- Checkpoint inventory ---
 st.subheader("Checkpoint inventory")
 inventory = checkpoint_inventory()
 if not inventory:
@@ -171,7 +171,7 @@ else:
 
 st.divider()
 
-# ── Recommendation file inventory ────────────────────────────────────────────
+# -- Recommendation file inventory ---
 st.subheader("Recommendation history")
 csvs = list_recommendation_csvs()
 if not csvs:

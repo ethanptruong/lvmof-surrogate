@@ -1,5 +1,5 @@
 """
-cosmo_features.py — COSMO-RS sigma-profile featurizer for the LVMOF-Surrogate pipeline.
+cosmo_features.py - COSMO-RS sigma-profile featurizer for the LVMOF-Surrogate pipeline.
 
 Reads VT-2005 sigma profile .txt files and computes sigma moments and surface
 charge descriptors for each experiment's solvent (or solvent mixture), then
@@ -14,14 +14,14 @@ Or imported and called programmatically:
     df_out = enrich_with_cosmo_features(df, index_path=..., cosmo_folder=...)
 
 Computed columns (Mix_ prefix = mole-fraction-weighted mixture value):
-  Sigma moments — from P(σ) (the 51-point sigma profile, σ in e/Å²):
+  Sigma moments - from P(σ) (the 51-point sigma profile, σ in e/Å²):
     Mix_M0_Area       : zeroth moment = total COSMO surface area (Å²)
     Mix_M1_NetCharge  : first moment  = net surface charge (≈0 for neutral molecules)
     Mix_M2_Polarity   : second moment = polarity descriptor
     Mix_M3_Asymmetry  : third moment  = charge asymmetry / sigma-profile skewness
     Mix_M4_Kurtosis   : fourth moment = peakedness of the sigma profile
 
-  Hydrogen-bonding moments — computed from P(σ) with an HB cutoff (σ_HB = 0.00854 e/Å²):
+  Hydrogen-bonding moments - computed from P(σ) with an HB cutoff (σ_HB = 0.00854 e/Å²):
     Mix_M_HB_Acc      : ∫ P(σ) · max(0,  σ − σ_HB) dσ  (acceptor strength)
     Mix_M_HB_Don      : ∫ P(σ) · max(0, −σ − σ_HB) dσ  (donor strength)
 
@@ -52,9 +52,9 @@ import numpy as np
 import pandas as pd
 
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# -- Configuration ---
 
-SIGMA_HB_CUTOFF = 0.00854   # e/Å²  — standard COSMO-RS HB cutoff
+SIGMA_HB_CUTOFF = 0.00854   # e/Å²  - standard COSMO-RS HB cutoff
 
 _DEFAULT_INDEX  = os.path.join("data", "VT-2005_Sigma_Profile_Database_Index_v2.xlsx")
 _DEFAULT_COSMO  = os.path.join("data", "solvent_cosmo")
@@ -79,14 +79,14 @@ COSMO_COLS = [
 ]
 
 
-# ── I/O helpers ───────────────────────────────────────────────────────────────
+# -- I/O helpers ---
 
 def load_cosmo_index(index_path: str) -> tuple[dict, dict, dict, dict]:
     """
     Load the VT-2005 sigma profile database index.
 
     Returns
-    -------
+    ---
     index_map   : {COMPOUND_NAME_UPPER -> Index No. (int)}
     bp_map      : {COMPOUND_NAME_UPPER -> Temp. (K) (float)}
     vcosmo_map  : {COMPOUND_NAME_UPPER -> Vcosmo, A3 (float)}
@@ -124,7 +124,7 @@ def load_sigma_profile(index_no: int, cosmo_folder: str) -> pd.DataFrame | None:
         return None
 
 
-# ── Moment calculation ────────────────────────────────────────────────────────
+# -- Moment calculation ---
 
 def compute_sigma_moments(
     sigma: np.ndarray,
@@ -135,13 +135,13 @@ def compute_sigma_moments(
     Compute all sigma moments and surface-fraction descriptors from a sigma profile.
 
     Parameters
-    ----------
+    ---
     sigma      : array of σ values (e/Å²), shape (51,)
     area       : array of P(σ) values (Å²), shape (51,)
     hb_cutoff  : hydrogen bond σ cutoff (e/Å²)
 
     Returns
-    -------
+    ---
     dict with keys matching COSMO_COLS (excluding Mix_Vcosmo, Mix_lnPvap which
     come from the index file).
     """
@@ -180,7 +180,7 @@ def compute_sigma_moments(
     }
 
 
-# ── Per-solvent lookup ────────────────────────────────────────────────────────
+# -- Per-solvent lookup ---
 
 def _collect_solvents(row: pd.Series) -> list[dict]:
     """
@@ -252,7 +252,7 @@ def _add_mole_fractions(
         return False
 
 
-# ── Main enrichment function ──────────────────────────────────────────────────
+# -- Main enrichment function ---
 
 def enrich_with_cosmo_features(
     df: pd.DataFrame,
@@ -265,7 +265,7 @@ def enrich_with_cosmo_features(
     Add COSMO sigma-moment features to a copy of *df* and return it.
 
     Parameters
-    ----------
+    ---
     df           : experiment dataframe with solvent_1/2/3 + volume columns
     index_path   : path to VT-2005_Sigma_Profile_Database_Index_v2.xlsx
     cosmo_folder : folder containing VT2005-XXXX-PROF.txt files
@@ -274,7 +274,7 @@ def enrich_with_cosmo_features(
                    that already have Mix_M0_Area populated.
 
     Returns
-    -------
+    ---
     df_out : enriched dataframe (copy)
     """
     df_out = df.copy()
@@ -315,7 +315,7 @@ def enrich_with_cosmo_features(
         # Mole fractions (Vcosmo-based proxy)
         _add_mole_fractions(solvents, vcosmo_map)
 
-        # ── Build weighted sigma profile ──────────────────────────────────────
+        # -- Build weighted sigma profile ---
         mix_area: np.ndarray | None = None
         sigma_axis: np.ndarray | None = None
         cosmo_ok = True
@@ -374,7 +374,7 @@ def enrich_with_cosmo_features(
     return df_out
 
 
-# ── CosmoMixer ────────────────────────────────────────────────────────────────
+# -- CosmoMixer ---
 
 class CosmoMixer:
     """
@@ -385,7 +385,7 @@ class CosmoMixer:
     phi_1 is a continuous search-space variable.
 
     Usage
-    -----
+    ---
     mixer = CosmoMixer()                         # uses default index/folder paths
     feats = mixer.compute("TOLUENE", "DICHLOROMETHANE", phi_1=0.6)
     solvents = mixer.available_solvents_from_df(train_df)
@@ -402,7 +402,7 @@ class CosmoMixer:
         self._cosmo_folder = cosmo_folder
         self._cache: dict = {}   # upper_name -> (sigma_arr, area_arr) or None
 
-    # ── internal ──────────────────────────────────────────────────────────────
+    # -- internal ---
 
     def _profile(self, name: str):
         """Load and cache a sigma profile.  Returns (sigma, area) or None."""
@@ -423,7 +423,7 @@ class CosmoMixer:
     def _nan_result() -> dict:
         return {c: np.nan for c in COSMO_COLS}
 
-    # ── public API ────────────────────────────────────────────────────────────
+    # -- public API ---
 
     def compute(
         self,
@@ -435,13 +435,13 @@ class CosmoMixer:
         Compute all COSMO_COLS features for a solvent mixture.
 
         Parameters
-        ----------
+        ---
         sol1  : name of solvent 1 (must be in VT-2005 index)
         sol2  : name of solvent 2; None / empty string → pure sol1
         phi_1 : volume fraction of solvent 1 ∈ [0, 1]
 
         Returns
-        -------
+        ---
         dict with all COSMO_COLS keys; NaN-filled on lookup failure.
         """
         if not sol1 or (isinstance(sol1, float) and np.isnan(sol1)):
@@ -462,13 +462,13 @@ class CosmoMixer:
             if candidate not in ("", "NAN", "NONE"):
                 sol2_key = candidate
 
-        # ── Pure sol1 or no valid sol2 ────────────────────────────────────────
+        # -- Pure sol1 or no valid sol2 ---
         if sol2_key is None or phi_1 >= 1.0:
             mix_area = area1
             vc  = self.vcosmo_map.get(sol1_key, np.nan)
             lnp = self.lnpvap_map.get(sol1_key, np.nan)
 
-        # ── Pure sol2 ─────────────────────────────────────────────────────────
+        # -- Pure sol2 ---
         elif phi_1 <= 0.0:
             prof2 = self._profile(sol2_key)
             if prof2 is None:
@@ -481,7 +481,7 @@ class CosmoMixer:
                 vc  = self.vcosmo_map.get(sol2_key, np.nan)
                 lnp = self.lnpvap_map.get(sol2_key, np.nan)
 
-        # ── Binary mixture ────────────────────────────────────────────────────
+        # -- Binary mixture ---
         else:
             prof2 = self._profile(sol2_key)
             if prof2 is None:
@@ -525,7 +525,7 @@ class CosmoMixer:
         return [s for s in observed if self._profile(s) is not None]
 
 
-# ── Standalone CLI entry point ────────────────────────────────────────────────
+# -- Standalone CLI entry point ---
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(

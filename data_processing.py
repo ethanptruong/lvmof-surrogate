@@ -1,5 +1,5 @@
 """
-data_processing.py — Data loading, cleaning, and inventory construction.
+data_processing.py - Data loading, cleaning, and inventory construction.
 """
 
 import pandas as pd
@@ -10,7 +10,7 @@ from collections import Counter
 from config import COLMAP
 
 
-# ── SMILES utilities ──────────────────────────────────────────────────────────
+# -- SMILES utilities ---
 
 def canonicalize_smiles(smiles):
     """Converts a SMILES string to its unique, standard canonical form."""
@@ -155,7 +155,7 @@ def add_parse_diagnostics(df, colmap, keys=("precursor","linker1","modulator","l
     return out
 
 
-# ── Data loading ──────────────────────────────────────────────────────────────
+# -- Data loading ---
 
 def load_data(file_path: str) -> pd.DataFrame:
     """Load the experiment dataset from an Excel file."""
@@ -186,17 +186,17 @@ def add_solvent_cosmo_features(df: pd.DataFrame) -> pd.DataFrame:
     if all(c in df.columns for c in COSMO_COLS):
         # If every row already has Mix_M0_Area we can skip the work entirely.
         if df["Mix_M0_Area"].notna().all():
-            print("[COSMO] All rows already enriched — skipping recomputation.")
+            print("[COSMO] All rows already enriched - skipping recomputation.")
             return df
         n_missing = int(df["Mix_M0_Area"].isna().sum())
-        print(f"[COSMO] {n_missing}/{len(df)} rows missing Mix_* — enriching...")
+        print(f"[COSMO] {n_missing}/{len(df)} rows missing Mix_* - enriching...")
     else:
-        print(f"[COSMO] Mix_* columns absent — computing from solvent proportions...")
+        print(f"[COSMO] Mix_* columns absent - computing from solvent proportions...")
 
     return enrich_with_cosmo_features(df, overwrite=False)
 
 
-# ── Missing value handling ─────────────────────────────────────────────────────
+# -- Missing value handling ---
 
 # Structural absence: no second/third solvent was used → 0 is the correct value.
 _STRUCTURAL_ZERO_COLS = [
@@ -242,7 +242,7 @@ def fix_missingness(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-# ── Inventory construction ────────────────────────────────────────────────────
+# -- Inventory construction ---
 
 def build_inventory(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -313,7 +313,7 @@ def build_inventory(df: pd.DataFrame) -> pd.DataFrame:
     return df_inventory
 
 
-# ── Merge ─────────────────────────────────────────────────────────────────────
+# -- Merge ---
 
 def merge_data(df: pd.DataFrame, df_inventory: pd.DataFrame) -> pd.DataFrame:
     """Merge the main dataset with the ligand inventory on experiment_id."""
@@ -321,7 +321,7 @@ def merge_data(df: pd.DataFrame, df_inventory: pd.DataFrame) -> pd.DataFrame:
     return df_merged
 
 
-# ── Process variable audit ────────────────────────────────────────────────────
+# -- Process variable audit ---
 
 def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
     """
@@ -336,9 +336,9 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
     process_cols_present = [c for c in process_cols if c in df_merged.columns]
     process_df = df_merged[process_cols_present].apply(pd.to_numeric, errors='coerce')
 
-    # ── 1. Global NaN summary ─────────────────────────────────────────────────────
+    # -- 1. Global NaN summary ---
     print("=" * 65)
-    print("  STEP 1 — NaN counts per column (raw, before any imputation)")
+    print("  STEP 1 - NaN counts per column (raw, before any imputation)")
     print("=" * 65)
     nan_summary = process_df.isnull().sum()
     total_nan = nan_summary.sum()
@@ -349,12 +349,12 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
             pct = 100 * n / len(process_df)
             print(f"  {col:<35} {n:>4} NaNs  ({pct:.1f}%)")
     if total_nan == 0:
-        print("  No NaNs found — issue is NOT missing values from the source file.")
+        print("  No NaNs found - issue is NOT missing values from the source file.")
 
-    # ── 2. Coercion failures — values that became NaN after to_numeric ─────────────
+    # -- 2. Coercion failures - values that became NaN after to_numeric ---
     print()
     print("=" * 65)
-    print("  STEP 2 — Values coerced to NaN (non-numeric strings in source)")
+    print("  STEP 2 - Values coerced to NaN (non-numeric strings in source)")
     print("=" * 65)
     raw_df = df_merged[process_cols_present]
     coercion_failures = {}
@@ -364,17 +364,17 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
         bad_mask = coerced.isnull() & original.notna()  # was something, became NaN
         if bad_mask.any():
             coercion_failures[col] = df_merged.loc[bad_mask, 'experiment_id'].tolist()
-            print(f"\n  ⚠️  {col} — {bad_mask.sum()} coercion failure(s):")
+            print(f"\n  ⚠️  {col} - {bad_mask.sum()} coercion failure(s):")
             print(f"      Raw values: {original[bad_mask].unique().tolist()}")
             print(f"      Experiments: {coercion_failures[col][:10]}")
 
     if not coercion_failures:
-        print("  ✅ No coercion failures — all values are numeric or truly NaN.")
+        print("  ✅ No coercion failures - all values are numeric or truly NaN.")
 
-    # ── 3. Temperature-specific check ─────────────────────────────────────────────
+    # -- 3. Temperature-specific check ---
     print()
     print("=" * 65)
-    print("  STEP 3 — Temperature sanity check (expected: 298–393 K)")
+    print("  STEP 3 - Temperature sanity check (expected: 298-393 K)")
     print("=" * 65)
     if 'temperature_k' in process_df.columns:
         temp = process_df['temperature_k']
@@ -395,10 +395,10 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
                                                'precursor_iupac_standardized',
                                                'metal_atom']].head(20))
 
-    # ── 4. Find ALL experiments with ANY bad process variable ─────────────────────
+    # -- 4. Find ALL experiments with ANY bad process variable ---
     print()
     print("=" * 65)
-    print("  STEP 4 — All experiments with ≥1 NaN process variable")
+    print("  STEP 4 - All experiments with ≥1 NaN process variable")
     print("=" * 65)
     any_nan_mask = process_df.isnull().any(axis=1)
     print(f"  {any_nan_mask.sum()} / {len(process_df)} experiments have at least one NaN")
@@ -415,10 +415,10 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
         print(f"\n  Worst offenders (most missing process vars):")
         print(bad_df.head(30))
 
-        # ── 5. Pattern — are bad experiments clustered by metal or source file? ──
+        # -- 5. Pattern - are bad experiments clustered by metal or source file? --
         print()
         print("=" * 65)
-        print("  STEP 5 — Are NaN experiments clustered by metal or source?")
+        print("  STEP 5 - Are NaN experiments clustered by metal or source?")
         print("=" * 65)
         print("\n  Metal breakdown of NaN experiments:")
         print(df_merged.loc[any_nan_mask, 'metal_atom'].value_counts().to_string())
@@ -427,7 +427,7 @@ def run_process_variable_audit(df_merged: pd.DataFrame) -> None:
             print(df_merged.loc[any_nan_mask, 'source_file'].value_counts().to_string())
 
 
-# ── Worst experiments lookup ──────────────────────────────────────────────────
+# -- Worst experiments lookup ---
 
 def get_worst_experiments(df_merged: pd.DataFrame, worst_ids: list) -> pd.DataFrame:
     """Return a subset of df_merged for the specified experiment IDs, showing solvent columns."""

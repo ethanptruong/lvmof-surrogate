@@ -41,7 +41,7 @@ page_header(
 )
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ---
 
 def _coerce_float(val: Any, default: float) -> float:
     """Convert ``val`` to float, falling back to ``default`` on failure."""
@@ -101,7 +101,7 @@ def _solvent_select(label: str, *, key: str, default: str = "", required: bool =
     Returns the uppercase solvent name, or "" for blank. ``default`` is
     matched case-insensitively against the choice list; an empty or unknown
     default leaves the box blank so the chemist can start typing immediately
-    instead of seeing an autopopulated solvent or a "— none —" sentinel.
+    instead of seeing an autopopulated solvent or a "- none -" sentinel.
     """
     choices = _solvent_choices()
 
@@ -116,10 +116,10 @@ def _solvent_select(label: str, *, key: str, default: str = "", required: bool =
         options=choices,
         index=initial_index,
         key=key,
-        help="Start typing to filter — only solvents with a VT-2005 COSMO "
+        help="Start typing to filter - only solvents with a VT-2005 COSMO "
              "profile are listed."
              + ("" if required else ""),
-        placeholder="Type to search…",
+        placeholder="Type to search...",
     )
     return selection or ""
 
@@ -220,7 +220,7 @@ def _try_save(row: dict, on_success_state_key: str) -> None:
         st.rerun()
 
 
-# ── Session-state defaults ───────────────────────────────────────────────────
+# -- Session-state defaults ---
 # Tracks per-pick "saved" outcomes so the card collapses into a green badge
 # after the user records that experiment.  Discarded picks are persisted on
 # disk via data_writer.discard_recommendation, so they survive page refresh.
@@ -228,16 +228,16 @@ st.session_state.setdefault("rr_pick_saved", {})   # {(iter, rank): {...}}
 st.session_state.setdefault("rr_manual_saved", None)
 
 
-# ── Tabs: BO recommendations vs. manual entry ────────────────────────────────
+# -- Tabs: BO recommendations vs. manual entry ---
 tab_bo, tab_manual = st.tabs([
     "From BO recommendations",
     "Manual entry",
 ])
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 # Tab 1: From BO recommendations
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 with tab_bo:
     history = iteration_history()
 
@@ -248,7 +248,7 @@ with tab_bo:
             "without a recommendation."
         )
     else:
-        # ── Target chemistry (one set of SMILES — applies to every pick) ─────
+        # -- Target chemistry (one set of SMILES - applies to every pick) ---
         st.subheader("Target chemistry")
         st.caption("These SMILES apply to every pick from this batch. Edit any "
                    "value to override.")
@@ -286,7 +286,7 @@ with tab_bo:
 
         st.divider()
 
-        # ── Iteration picker ──────────────────────────────────────────────────
+        # -- Iteration picker ---
         iter_options = sorted(
             {int(r.get("iteration", 0)) for r in history.recommendations},
             reverse=True,
@@ -324,7 +324,7 @@ with tab_bo:
                 f"dataset size at the time: {selected_batch.get('n_data', '?')}"
             )
 
-        # ── Per-pick cards ────────────────────────────────────────────────────
+        # -- Per-pick cards ---
         for i, cand in enumerate(candidates):
             try:
                 rank = int(cand.get("batch_rank", i + 1))
@@ -369,7 +369,7 @@ with tab_bo:
                     pass
 
             with st.expander(header, expanded=(i == 0)):
-                # ── Identifier ───────────────────────────────────────────────
+                # -- Identifier ---
                 default_id = f"GUI-iter{int(selected_iter)}-pick{rank}"
                 experiment_id = st.text_input(
                     "Experiment ID",
@@ -378,7 +378,7 @@ with tab_bo:
                     help="Edit if your lab uses a different numbering scheme.",
                 )
 
-                # ── Solvent system ──────────────────────────────────────────
+                # -- Solvent system ---
                 # Solvent boxes start empty so the chemist can type the
                 # solvent they actually used instead of overwriting a
                 # pre-filled BO suggestion. Fractions still default from the
@@ -445,7 +445,7 @@ with tab_bo:
                     st.warning(f"Solvent fractions sum to {frac_sum:.2f}; "
                                "should be 1.00.")
 
-                # ── Process conditions ──────────────────────────────────────
+                # -- Process conditions ---
                 st.markdown("**Process conditions**")
                 cp1, cp2, cp3, cp4 = st.columns(4)
                 with cp1:
@@ -489,7 +489,7 @@ with tab_bo:
                     step=1.0, key=f"hrs_{pick_key}",
                 )
 
-                # ── PXRD outcome ───────────────────────────────────────────
+                # -- PXRD outcome ---
                 st.markdown("**PXRD outcome**")
                 st.caption(PXRD_KEY)
                 cpx1, cpx2 = st.columns([1, 3])
@@ -506,7 +506,7 @@ with tab_bo:
                         height=80, key=f"notes_{pick_key}",
                     )
 
-                # ── Action buttons ──────────────────────────────────────────
+                # -- Action buttons ---
                 act_save, act_disc = st.columns(2)
                 save_disabled = not chemistry_ok or not solvent_1.strip() or not experiment_id.strip()
 
@@ -565,9 +565,9 @@ with tab_bo:
                     st.rerun()
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 # Tab 2: Manual entry
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 with tab_manual:
     st.caption("Use this tab to record an experiment that wasn't suggested by "
                "the BO loop \u2014 e.g. a one-off control or a hand-designed "

@@ -1,5 +1,5 @@
 """
-run_shap.py — Standalone SHAP analysis with labeled features.
+run_shap.py - Standalone SHAP analysis with labeled features.
 
 Usage:
     python run_shap.py                  # run all 6 pipelines
@@ -63,7 +63,7 @@ def main():
                         help='Run only this pipeline (e.g. "XGB | MI only")')
     args = parser.parse_args()
 
-    # ── Load hyperparams ──
+    # -- Load hyperparams --
     if not os.path.exists(PARAMS_CKPT):
         print("ERROR: No checkpoints/best_params.pkl found. Run the full pipeline first.")
         sys.exit(1)
@@ -71,7 +71,7 @@ def main():
     ck_params = joblib.load(PARAMS_CKPT)
     print(f"[shap] Loaded hyperparams from {PARAMS_CKPT}")
 
-    # ── Featurize from source (we need intermediate arrays for name catalog) ──
+    # -- Featurize from source (we need intermediate arrays for name catalog) --
     data_path = args.data or os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                            "data", "Experiments_with_Calculated_Properties_no_linker.xlsx")
     print(f"[shap] Loading and featurizing data from {data_path}...")
@@ -94,7 +94,7 @@ def main():
     )
     X_cv = assemble_cv_matrix(X_vt, Xprocnorm, interactions)
 
-    # ── Rebuild intermediate arrays needed for the catalog ──
+    # -- Rebuild intermediate arrays needed for the catalog --
     print("[shap] Rebuilding intermediate feature blocks for name catalog...")
 
     X_modulator_rac_aug, _, X_precursor_perlig_rac = \
@@ -147,7 +147,7 @@ def main():
         df_merged, linker_col
     )
 
-    # ── Build feature name catalog ──
+    # -- Build feature name catalog --
     vt_mask = vt_pre.get_support()
 
     X_names, X_groups = build_feature_catalog(
@@ -199,7 +199,7 @@ def main():
             X_names = X_names[:X_cv.shape[1]]
             X_groups = X_groups[:X_cv.shape[1]]
 
-    # ── Build pipelines ──
+    # -- Build pipelines --
     pipe_defs = [
         ("XGB | MI only",          lambda p: make_xgb_pipe(p, with_cl=False),
          "best_xgb_mi_params"),

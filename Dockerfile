@@ -1,4 +1,4 @@
-# COMPASS — LVMOF synthesis assistant (Streamlit + heavy ML stack)
+# COMPASS - LVMOF synthesis assistant (Streamlit + heavy ML stack)
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Install the CPU-only build of torch first (transformers/ChemBERTa needs it).
-# The default torch wheel bundles CUDA and is ~2 GB larger — we don't have a GPU.
+# The default torch wheel bundles CUDA and is ~2 GB larger - we don't have a GPU.
 RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Then the project deps. Streamlit, filelock (cross-process Excel lock) and

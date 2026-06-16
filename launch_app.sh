@@ -13,7 +13,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ── Optional: activate environment ────────────────────────────────────────
+# -- Optional: activate environment ---
 # Windows (Git Bash) uses .venv/Scripts; Linux/macOS uses .venv/bin.
 if [ -f ".venv/Scripts/activate" ]; then
     source .venv/Scripts/activate
@@ -22,12 +22,12 @@ elif [ -f ".venv/bin/activate" ]; then
 fi
 # conda activate lvmof
 
-# ── Build timestamped log path ────────────────────────────────────────────
+# -- Build timestamped log path ---
 mkdir -p logs
 LOGFILE="logs/app_$(date +%Y%m%d_%H%M%S).log"
 echo "Logging to $LOGFILE"
 
-# ── Run Streamlit (tee to terminal + log file) ────────────────────────────
+# -- Run Streamlit (tee to terminal + log file) ---
 streamlit run app/streamlit_app.py \
     --server.port 8501 \
     --server.address 0.0.0.0 \

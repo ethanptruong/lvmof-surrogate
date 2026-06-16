@@ -35,7 +35,7 @@ from bo_core import _compute_tail_weights
 from config import BO_TAIL_WEIGHT_THRESHOLD
 
 
-# ---- data + pipeline construction --------------------------------------------
+# ---- data + pipeline construction ---
 
 def load_features(data_path=None):
     """Use the same loader BO simulate uses."""
@@ -56,7 +56,7 @@ def build_pipeline(surrogate_name):
     return surr.pipeline, surr._regressor_step_name()
 
 
-# ---- metrics -----------------------------------------------------------------
+# ---- metrics ---
 
 def ndcg_at_k(y_true, y_pred, k):
     """Standard NDCG@k with raw y as relevance."""
@@ -124,7 +124,7 @@ def evaluate_alpha(X, y, alpha, surrogate_name, k_folds, top_k,
     return {k: np.asarray(v, dtype=float) for k, v in metrics.items()}
 
 
-# ---- plotting ----------------------------------------------------------------
+# ---- plotting ---
 
 def plot_results(results, alphas, save_path, surrogate_name,
                  hit_threshold, top_k, n_total, n_tail):
@@ -173,7 +173,7 @@ def plot_results(results, alphas, save_path, surrogate_name,
         ax.legend(loc="best", fontsize=8)
 
     fig.suptitle(
-        f"Tail-weight α sweep — surrogate={surrogate_name}, "
+        f"Tail-weight α sweep - surrogate={surrogate_name}, "
         f"threshold={BO_TAIL_WEIGHT_THRESHOLD} | "
         f"n={n_total}, tail (y≥{hit_threshold})={n_tail}",
         fontsize=12,
@@ -184,7 +184,7 @@ def plot_results(results, alphas, save_path, surrogate_name,
     print(f"\n  saved figure -> {save_path}")
 
 
-# ---- driver ------------------------------------------------------------------
+# ---- driver ---
 
 def main():
     parser = argparse.ArgumentParser(
@@ -230,7 +230,7 @@ def main():
     n_tail = int((y >= args.hit_threshold).sum())
     print(f"  n_total = {len(y)},  tail (y >= {args.hit_threshold}) = {n_tail}")
     if n_tail < args.k_folds:
-        print(f"  WARNING: only {n_tail} tail rows for {args.k_folds} folds — "
+        print(f"  WARNING: only {n_tail} tail rows for {args.k_folds} folds - "
               f"some test folds may have zero tail rows.")
 
     results = {}

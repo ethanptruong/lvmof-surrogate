@@ -29,7 +29,7 @@ FEATURES_CKPT = os.path.join("checkpoints", "features.pkl")
 BO_BORE_GAMMA = 0.25
 
 
-# ---- helpers -----------------------------------------------------------------
+# ---- helpers ---
 
 def load_data():
     cached = joblib.load(FEATURES_CKPT)
@@ -52,7 +52,7 @@ def get_solvent_label(df):
     return s1
 
 
-# ---- check 1: pairwise distance vs. outcome difference -----------------------
+# ---- check 1: pairwise distance vs. outcome difference ---
 
 def check_pairwise(X, y, ax, n_sample=2000, rng=42):
     n = len(y)
@@ -99,7 +99,7 @@ def check_pairwise(X, y, ax, n_sample=2000, rng=42):
     return rho, pval
 
 
-# ---- check 2: within vs. between solvent variance ----------------------------
+# ---- check 2: within vs. between solvent variance ---
 
 def check_solvent_variance(y, solvent_labels, ax):
     df = pd.DataFrame({"y": y, "solvent": solvent_labels})
@@ -138,7 +138,7 @@ def check_solvent_variance(y, solvent_labels, ax):
     return within_var, between_var
 
 
-# ---- check 3: k-NN label consistency ----------------------------------------
+# ---- check 3: k-NN label consistency ---
 
 def check_knn_consistency(X, y, gamma, k, ax):
     tau    = np.quantile(y, 1 - gamma)
@@ -175,7 +175,7 @@ def check_knn_consistency(X, y, gamma, k, ax):
     return mean_consistency, tau
 
 
-# ---- check 4: semivariogram --------------------------------------------------
+# ---- check 4: semivariogram ---
 
 def check_semivariogram(X, y, ax, n_bins=10):
     """Empirical semivariogram: semivariance vs. distance bin.
@@ -230,7 +230,7 @@ def check_semivariogram(X, y, ax, n_bins=10):
     return has_sill, rising, flat
 
 
-# ---- main --------------------------------------------------------------------
+# ---- main ---
 
 def main():
     parser = argparse.ArgumentParser(description="SSL cluster-assumption diagnostics")
@@ -267,7 +267,7 @@ def main():
     fig.savefig(args.out, dpi=150, bbox_inches="tight")
     print(f"Figure saved -> {args.out}")
 
-    print("\n-- Summary ----------------------------------------------------------")
+    print("\n-- Summary ---")
     print(f"  Check 1  Pairwise smoothness:  Spearman r = {rho:.3f}  (p = {pval:.3f})")
     if within_var is not None:
         ratio = between_var / (within_var + 1e-9)

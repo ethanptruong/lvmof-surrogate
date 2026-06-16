@@ -38,7 +38,7 @@ from bo_core import LFBOAcquisition
 from config import BO_LFBO_GAMMA, RANDOM_STATE
 
 
-# ---- data --------------------------------------------------------------------
+# ---- data ---
 
 def load_features(data_path=None):
     from main import _load_bo_data
@@ -46,7 +46,7 @@ def load_features(data_path=None):
     return X_cv, y_raw
 
 
-# ---- metrics -----------------------------------------------------------------
+# ---- metrics ---
 
 def ndcg_at_k(y_true, y_score, k):
     k = min(k, len(y_true))
@@ -103,7 +103,7 @@ def evaluate_gamma(X, y, gamma, k_folds, top_k, hit_threshold, random_state):
     return {k: np.asarray(v, dtype=float) for k, v in metrics.items()}
 
 
-# ---- plotting ----------------------------------------------------------------
+# ---- plotting ---
 
 def plot_results(results, gammas, save_path, hit_threshold, top_k,
                  n_total, n_tail, default_gamma):
@@ -161,7 +161,7 @@ def plot_results(results, gammas, save_path, hit_threshold, top_k,
     print(f"\n  saved figure -> {save_path}")
 
 
-# ---- driver ------------------------------------------------------------------
+# ---- driver ---
 
 def main():
     parser = argparse.ArgumentParser(

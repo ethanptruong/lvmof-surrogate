@@ -1,5 +1,5 @@
 """
-smiles_cache.py — Persistent SMILES-to-feature cache.
+smiles_cache.py - Persistent SMILES-to-feature cache.
 
 Stores {(namespace, smiles): np.ndarray} on disk so that expensive per-SMILES
 computations (ChemBERTa, DRFP, SOAP, Mordred, etc.) are only run once per
@@ -7,7 +7,7 @@ unique SMILES.  Results are reused across featurization runs as long as the
 SMILES has been seen before.
 
 Usage
------
+---
     from smiles_cache import get_smiles_cache
 
     cache = get_smiles_cache()
@@ -35,12 +35,12 @@ class SMILESCache:
                 self._store = joblib.load(path)
                 print(f"[smiles_cache] Loaded {len(self._store):,} entries from {path}")
             except Exception as e:
-                print(f"[smiles_cache] Could not load cache ({e}) — starting fresh.")
+                print(f"[smiles_cache] Could not load cache ({e}) - starting fresh.")
                 self._store = {}
         else:
             self._store = {}
 
-    # ------------------------------------------------------------------
+    # ---
     def get(self, namespace: str, key: str):
         """Return cached value or None."""
         return self._store.get((namespace, key))
@@ -63,7 +63,7 @@ class SMILESCache:
         return len(self._store)
 
 
-# Module-level singleton — loaded once per process.
+# Module-level singleton - loaded once per process.
 _instance: SMILESCache | None = None
 
 

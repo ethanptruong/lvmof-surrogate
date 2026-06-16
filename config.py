@@ -1,12 +1,12 @@
 """
-config.py — All constants and configuration for the LVMOF-Surrogate pipeline.
+config.py - All constants and configuration for the LVMOF-Surrogate pipeline.
 """
 
-# ── Data ─────────────────────────────────────────────────────────────────────
+# -- Data ---
 DATA_FILE_PATH = "data/Experiments_with_Calculated_Properties_no_linker.xlsx"
 TEP_MODEL_URL  = "https://github.com/DanielEss-lab/TEPid/raw/main/Machine_Learning_Model/LGBMReg_model.pkl"
 
-# ── Column mapping ────────────────────────────────────────────────────────────
+# -- Column mapping ---
 COLMAP = {
     "id":        "experiment_id",
     "precursor": "smiles_precursor",
@@ -15,13 +15,13 @@ COLMAP = {
     "linker2":   "smiles_linker_2",
 }
 
-# ── Target metals ─────────────────────────────────────────────────────────────
+# -- Target metals ---
 TARGET_METALS = ['Pd', 'Rh', 'Pt', 'Ag', 'Ir', 'Au', 'Cu', 'Co', 'Ni', 'Fe', 'Ru', 'Os']
 
-# ── Oxidation state parsing ────────────────────────────────────────────────────
+# -- Oxidation state parsing ---
 ROMAN_TO_INT = {'0': 0, 'I': 1, 'II': 2, 'III': 3, 'IV': 4, 'V': 5, 'VI': 6}
 
-# ── CBC lookup ────────────────────────────────────────────────────────────────
+# -- CBC lookup ---
 GROUP11_METALS = {'Cu', 'Ag', 'Au'}
 
 PRECURSOR_CBC = {
@@ -56,11 +56,11 @@ PRECURSOR_CBC = {
     'digold complex':                                             (2, 0),
 }
 
-# ── Geometry labels ───────────────────────────────────────────────────────────
+# -- Geometry labels ---
 GEOMETRY_LABELS = ['linear', 'trigonal_planar', 'square_planar',
                    'tetrahedral', 'trigonal_bipyramidal', 'octahedral', 'unknown']
 
-# ── Process variable column list ──────────────────────────────────────────────
+# -- Process variable column list ---
 PROCESS_COLS = [
     'equivalents',
     'total_solvent_volume_ml',
@@ -71,7 +71,7 @@ PROCESS_COLS = [
     # Gutmann AN/DN, dielectric, polarity, Hansen sig_h/d/p) were removed in
     # favor of the COSMO-RS Mix_* block below, which encodes the same physics
     # directly from VT-2005 sigma profiles (no NaNs on newly-recorded rows).
-    # COSMO-RS mixture descriptors — populated by cosmo_features.enrich_with_cosmo_features
+    # COSMO-RS mixture descriptors - populated by cosmo_features.enrich_with_cosmo_features
     # (mole-fraction-weighted sigma moments + HB + surface fractions from VT-2005 profiles).
     # Must stay in sync with cosmo_features.COSMO_COLS.
     'Mix_M0_Area',
@@ -98,7 +98,7 @@ PROCESS_COLS = [
     'total_conc',
 ]
 
-# ── Model / training constants ────────────────────────────────────────────────
+# -- Model / training constants ---
 SMOTE_STRATEGY = {1: 180, 2: 250}
 XGB_FIXED      = {"tree_method": "hist", "eval_metric": "logloss", "random_state": 42}
 XGB_TUNED_KEYS = {
@@ -113,14 +113,14 @@ CL_NEGATIVE_CLASS = 1     # 1 = partial/hard negatives, 0 = amorphous/easy negat
 RANDOM_STATE      = 42
 CV_NJOBS     = 1   
 
-# ── ChemBERTa ────────────────────────────────────────────────────────────────
+# -- ChemBERTa ---
 CHEMBERTA_MODEL = "DeepChem/ChemBERTa-77M-MTR"
 BERT_DIM        = 384
 
-# ── KMeans ────────────────────────────────────────────────────────────────────
+# -- KMeans ---
 N_CLUSTERS = 10
 
-# ── SOAP elements ─────────────────────────────────────────────────────────────
+# -- SOAP elements ---
 ELEMENT_TO_Z = {
     'H':1,'C':6,'N':7,'O':8,'F':9,'P':15,'S':16,'Cl':17,
     'Br':35,'I':53,'Si':14,'Ge':32,'Sn':50,'B':5
@@ -128,13 +128,13 @@ ELEMENT_TO_Z = {
 Z_TO_ELEMENT = {v: k for k, v in ELEMENT_TO_Z.items()}
 SOAP_SPECIES = list(ELEMENT_TO_Z.keys())
 
-# ── Ion map (shared across cells 14, 15, 16) ──────────────────────────────────
+# -- Ion map (shared across cells 14, 15, 16) ---
 ION_MAP = {
     "Cl-": "[Cl-]", "Br-": "[Br-]", "I-": "[I-]", "F-": "[F-]",
     "Cl":  "[Cl-]", "Br":  "[Br-]", "I":  "[I-]", "F":  "[F-]",
 }
 
-# ── Metal center block dimensions (cell 16) ───────────────────────────────────
+# -- Metal center block dimensions (cell 16) ---
 _COLIGAND_LOOKUP = {
     # CO: strong π-acceptor, weak trans influence relative to H,
     #     but highest field strength ligand known
@@ -153,7 +153,7 @@ _COLIGAND_LOOKUP = {
     'F':     [-0.40, 0.15, 0.52, -1.0,  1.0, 0.0],
 }
 
-# Feature names matching the 6-vector above — use these in SHAP
+# Feature names matching the 6-vector above - use these in SHAP
 _COLIGAND_FEATURE_NAMES = [
     'EL_lever_V',          # Lever electrochemical parameter (Lever 1990)
     'trans_influence',     # Appleton 1973 normalized scale
@@ -175,7 +175,7 @@ METAL_BLOCK_DIM   = 32
 COLIGAND_BLOCK_DIM = 28
 COMPLEX_BLOCK_DIM  = 12
 
-# ── G14 hub topology constants ────────────────────────────────────────────────
+# -- G14 hub topology constants ---
 GROUP14_SYMBOLS = {'Si', 'Ge', 'Sn', 'Pb'}
 COORD_SYMBOLS   = {'P', 'N', 'O'}
 
@@ -211,7 +211,7 @@ G14_HUB_NAMES = [
     'g14hub_missing',
 ]
 
-# ── G14 SMARTS patterns ───────────────────────────────────────────────────────
+# -- G14 SMARTS patterns ---
 G14_SMARTS_RAW = {
     'g14_Si_X4':          '[Si;X4]',
     'g14_Ge_X4':          '[Ge;X4]',
@@ -245,7 +245,7 @@ G14_SMARTS_RAW = {
 
 ALL_G14_SMARTS_NAMES = list(G14_SMARTS_RAW.keys()) + ['g14_smarts_missing']
 
-# ── TTP constants ──────────────────────────────────────────────────────────────
+# -- TTP constants ---
 TTP_DIM = 52
 
 TTP_FEATURE_NAMES = [
@@ -303,11 +303,11 @@ TTP_FEATURE_NAMES = [
     'ttp_n_PPh2_groups',
 ]
 
-# ── Halide features ───────────────────────────────────────────────────────────
+# -- Halide features ---
 HALIDE_FEAT_COLS = ['halide_type', 'halide_count', 'halide_present',
                     'halide_I_count', 'halide_Br_count', 'halide_Cl_count']
 
-# ── Shape / VSA / Composition / MACCS / Fragment names ───────────────────────
+# -- Shape / VSA / Composition / MACCS / Fragment names ---
 SHAPE_3D_NAMES = [
     "NPR1", "NPR2",
     "PMI1", "PMI2", "PMI3",
@@ -336,7 +336,7 @@ FRAGMENT_NAMES = [
     "fr_phenol", "fr_imide", "fr_sulfone", "fr_nitro", "fr_urea",
 ]
 
-# ── Extended RDKit SMARTS ─────────────────────────────────────────────────────
+# -- Extended RDKit SMARTS ---
 _SMARTS_RAW = {
     "COOH":         "[CX3](=O)[OX2H1]",
     "COO_neg":      "[CX3](=O)[O-]",
@@ -365,7 +365,7 @@ _COORD_KEYS = ["COOH", "COO_neg", "py_N", "amine_prim",
                "amine_sec", "hydroxyl", "imidazole", "tetrazole",
                "phosphonate", "sulfonate"]
 
-# ── Bayesian Optimization ────────────────────────────────────────────────────
+# -- Bayesian Optimization ---
 # Single source of truth for the scientific success criterion: a "hit" is a
 # pxrd_score >= BO_HIT_THRESHOLD (crystalline product). Used by AF / EF / Hit%
 # metrics, the LFBO acquisition, the gamma sweep, and tail-reweighted training.
@@ -397,8 +397,8 @@ BO_LFBO_SSL_PSEUDO_WEIGHT = 0.3
 BO_LFBO_SSL_USE_SIGMA     = True   # downweight high-sigma (uncertain) pseudo-labels
 
 # Tail-reweighted regression: inverse-frequency sample weights on rare high-y rows.
-# Redirects surrogate capacity to the 7–9 region BO actually cares about instead of
-# letting the 0–3 mass dominate MSE. Disabled automatically for RankingRegressionSurrogate.
+# Redirects surrogate capacity to the 7-9 region BO actually cares about instead of
+# letting the 0-3 mass dominate MSE. Disabled automatically for RankingRegressionSurrogate.
 BO_TAIL_WEIGHT_ENABLED   = True
 BO_TAIL_WEIGHT_THRESHOLD = BO_HIT_THRESHOLD   # mirror the unified hit threshold
 BO_TAIL_WEIGHT_ALPHA     = 0.5   # 0 = off, 1 = full inverse-frequency, 2 = aggressive
@@ -412,7 +412,7 @@ BO_CONTROLLABLE_PARAMS = {
     "linker_conc":           None,   # computed at runtime via percentile clipping
     "phi_1":                 (0.0, 1.0),   # solvent_1 volume fraction
 }
-# Optional param, off by default — enable via --bo-include-mlr
+# Optional param, off by default - enable via --bo-include-mlr
 BO_OPTIONAL_PARAMS = {
     "metal_over_linker_ratio": (0.0, 4.0),
 }

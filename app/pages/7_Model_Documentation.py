@@ -3,10 +3,10 @@
 A plain-language tour of how COMPASS's surrogate works, written for a
 synthetic chemist rather than a software engineer. Three goals:
 
-  1. Demystify the pipeline — what happens between "PXRD score in Excel"
+  1. Demystify the pipeline - what happens between "PXRD score in Excel"
      and "predicted score for a candidate".
   2. Explain why this project prioritizes **precision** over recall when
-     comparing surrogates — BO only needs *some* crystalline picks to
+     comparing surrogates - BO only needs *some* crystalline picks to
      work, so a model that's stingy-but-right is preferable to one that
      casts a wide net.
   3. Teach how to read the per-surrogate learning curves so the user can
@@ -38,7 +38,7 @@ page_header(
 )
 
 
-# ── Section 1: What the surrogate is for ─────────────────────────────────────
+# -- Section 1: What the surrogate is for ---
 st.subheader("Surrogate Summary")
 
 st.markdown(
@@ -47,8 +47,8 @@ The surrogate is a predictor of **PXRD** crystallinity, built from previous expe
 Given a candidate synthesis recipe (metal precursor, linker, modulator, solvents,
 temperature, concentration, time, etc.) it returns:
 
-- A **predicted PXRD class** — Amorphous (0) / Partial (1) / Crystalline (2).
-- A **predicted continuous score** in the original 0–9 range, useful for
+- A **predicted PXRD class** - Amorphous (0) / Partial (1) / Crystalline (2).
+- A **predicted continuous score** in the original 0-9 range, useful for
   ranking candidates that fall in the same class.
 - An **uncertainty estimate** High spread => the model hasn't
   seen anything like this candidate before.
@@ -66,12 +66,12 @@ It should be noted that the goal of this model is to maximize the crystallinity 
 st.divider()
 
 
-# ── Scoring guide: how to label your own PXRD patterns ───────────────────────
+# -- Scoring guide: how to label your own PXRD patterns ---
 st.subheader("How to Score PXRDs")
 
 st.markdown(
     """
-The model is trained on a **0–9 ordinal score** of PXRD crystallinity. This allows for comparison between different systems, but also allows for variance in interrater reliability.
+The model is trained on a **0-9 ordinal score** of PXRD crystallinity. This allows for comparison between different systems, but also allows for variance in interrater reliability.
 If you plan to record your own experiments and feed them back into the
 pipeline, scoring consistency is the single biggest lever on model
 quality. Two scorers disagreeing by ±2 across the dataset will swamp
@@ -79,17 +79,17 @@ any algorithmic improvement.
 I 
 **Anchors:**
 
-- **0** — *No product formed.* Not enought material for a PXRD pattern. Use 0 whenever the synthesis failed outright.
-- **1** — *Complex / non-MOF product.* If you isolated a coordination
+- **0** - *No product formed.* Not enought material for a PXRD pattern. Use 0 whenever the synthesis failed outright.
+- **1** - *Complex / non-MOF product.* If you isolated a coordination
   complex or other non-target solid rather than a MOF, label it **0 or
   1** depending on how strongly you want the model to *avoid* this
   region of synthesis space in future recommendations. A 0 is a hard
   "don't go here"; a 1 is a softer "this didn't give the target, but
   the chemistry is closer than nothing".
-- **2–8** — *Partial crystallinity.* Increasingly sharp/intense peaks
+- **2-8** - *Partial crystallinity.* Increasingly sharp/intense peaks
   matching the target reference, scaling roughly with peak count,
   sharpness, and signal-to-background.
-- **9** — *Fully crystalline target MOF.* Sharp peaks at all expected
+- **9** - *Fully crystalline target MOF.* Sharp peaks at all expected
   reference positions, strong intensity, low background.
 
 Use the reference patterns below to anchor your scoring. When in
@@ -100,27 +100,27 @@ doubt, score conservatively (one bin lower).
 _DEMO_DIR = os.path.join(_PROJECT_ROOT, "app", "assets", "pxrd_demos")
 
 _DEMO_CAPTIONS = {
-    0: "**0 — No product formed.** No PXRD pattern collected, or a flat/noise-only "
-       "trace. Use this when the synthesis failed outright. (No reference image — "
+    0: "**0 - No product formed.** No PXRD pattern collected, or a flat/noise-only "
+       "trace. Use this when the synthesis failed outright. (No reference image - "
        "absence of a pattern is the signal.)",
-    1: "**1 — Complex or non-MOF product, or barely-detectable order.** Use 0 or 1 "
+    1: "**1 - Complex or non-MOF product, or barely-detectable order.** Use 0 or 1 "
        "for isolated complexes depending on how strongly you want to deter the "
        "model from this region.",
-    2: "**2 — Very weak, broad features.** A hint of order above background but no "
+    2: "**2 - Very weak, broad features.** A hint of order above background but no "
        "clear peaks matching the target reference.",
-    3: "**3 — Broad, weak peaks at some expected positions.** Crystallinity is "
+    3: "**3 - Broad, weak peaks at some expected positions.** Crystallinity is "
        "emerging but the product is mostly disordered.",
-    4: "**4 — Several discernible peaks** at expected positions, still broad and "
+    4: "**4 - Several discernible peaks** at expected positions, still broad and "
        "modest in intensity.",
-    5: "**5 — Clear partial crystallinity.** Most expected peaks visible but "
+    5: "**5 - Clear partial crystallinity.** Most expected peaks visible but "
        "broader and weaker than a clean reference.",
-    6: "**6 — Good crystallinity.** Sharp peaks at expected positions, moderate "
+    6: "**6 - Good crystallinity.** Sharp peaks at expected positions, moderate "
        "intensity, some background remaining.",
-    7: "**7 — Strong crystallinity.** Sharp, intense peaks across the expected "
+    7: "**7 - Strong crystallinity.** Sharp, intense peaks across the expected "
        "pattern; minor background or impurity peaks acceptable.",
-    8: "**8 — Excellent crystallinity.** Sharp, intense, well-resolved peaks "
+    8: "**8 - Excellent crystallinity.** Sharp, intense, well-resolved peaks "
        "matching the reference; very low background.",
-    9: "**9 — Fully crystalline target MOF.** Sharp peaks at all expected "
+    9: "**9 - Fully crystalline target MOF.** Sharp peaks at all expected "
        "reference positions, strong intensity, clean background.",
 }
 
@@ -144,12 +144,12 @@ for score in range(0, 10):
 st.divider()
 
 
-# ── Section 2: Step-by-step pipeline ─────────────────────────────────────────
+# -- Section 2: Step-by-step pipeline ---
 st.subheader("Implementation")
 
 st.markdown(
     """
-Below is the full pipeline. Each step is independent and reproducible — you can
+Below is the full pipeline. Each step is independent and reproducible - you can
 inspect intermediate artifacts under `checkpoints/` and `data/` folders.
 """
 )
@@ -165,21 +165,21 @@ pipeline builds a wide feature matrix (~10,000 raw columns) by stacking
 
 | Block | What it captures (in chemist terms) |
 |---|---|
-| **Metal center (A)** | Electronegativity, atomic / covalent radii, d-electron count, oxidation state, preferred geometry — basically a periodic-table fingerprint for the metal. |
+| **Metal center (A)** | Electronegativity, atomic / covalent radii, d-electron count, oxidation state, preferred geometry - basically a periodic-table fingerprint for the metal. |
 | **Co-ligand inventory (B)** | Counts of halides, phosphines, carbonyls; net charge on the metal precursor; σ/π donor / acceptor strength from lookup tables. |
-| **Complex-level (C)** | Coordination number, dimer flags, ligand-diversity counts, metal precursor charge — the "shape" of the metal complex before linker addition. |
-| **Mordred RAC autocorrelation** | How chemical properties are distributed across each ligand's graph — sensitive to substitution patterns. |
-| **RDKit physicochemical** | MW, LogP, TPSA, rotatable-bond count, H-bond donor/acceptor counts — the usual medicinal-chemistry knobs, repurposed. |
+| **Complex-level (C)** | Coordination number, dimer flags, ligand-diversity counts, metal precursor charge - the "shape" of the metal complex before linker addition. |
+| **Mordred RAC autocorrelation** | How chemical properties are distributed across each ligand's graph - sensitive to substitution patterns. |
+| **RDKit physicochemical** | MW, LogP, TPSA, rotatable-bond count, H-bond donor/acceptor counts - the usual medicinal-chemistry knobs, repurposed. |
 | **Tolman Electronic Parameter (TEP)** | Predicted phosphine donor strength (from a small LGBM regressor pretrained on literature TEP values). |
 | **Steric descriptors (`morfeus`)** | Cone angle and percent buried volume for phosphine-containing ligands. |
-| **ChemBERTa-2 embeddings** | A 384-dim "semantic" fingerprint from a chemistry-pretrained transformer — captures structural similarity the hand-crafted descriptors miss. |
-| **Extended RDKit (SMARTS counts)** | Counts of MOF-relevant functional groups: –COOH, pyridyl-N, imidazole, sulfonate, etc. |
+| **ChemBERTa-2 embeddings** | A 384-dim "semantic" fingerprint from a chemistry-pretrained transformer - captures structural similarity the hand-crafted descriptors miss. |
+| **Extended RDKit (SMARTS counts)** | Counts of MOF-relevant functional groups: -COOH, pyridyl-N, imidazole, sulfonate, etc. |
 | **3D shape (RDKit ETKDGv3)** | PMI, asphericity, eccentricity, spherocity, radius of gyration of each component. |
-| **TTP / G14 hub topology** | Tetratopic linker arm geometry, hub element identity, P-arm counts — built specifically for the LVMOF chemistry our lab works in. |
+| **TTP / G14 hub topology** | Tetratopic linker arm geometry, hub element identity, P-arm counts - built specifically for the LVMOF chemistry our lab works in. |
 | **DRFP reaction fingerprint** | A 2048-bit hashed fingerprint of the full *reaction* (metal precursor + linker + modulator), not just one molecule. |
 
-Process variables — temperature, M:L ratio, concentrations, reaction
-time, solvent fractions — are concatenated on the end, along with their
+Process variables - temperature, M:L ratio, concentrations, reaction
+time, solvent fractions - are concatenated on the end, along with their
 pairwise interactions (e.g. *T × M:L*, *T × time*). **Solvent mixtures
 are summarized by their COSMO-RS σ-profile moments** (area, polarity,
 asymmetry, kurtosis, H-bond donor / acceptor capacity), so a mixed
@@ -196,7 +196,7 @@ without overfitting. That is, learning a false signal or memorizing data. We imp
 
 1. **Variance threshold:** drop any column that is constant  in the training data. (A descriptor that's the same
    for every row carries zero information.)
-2. **Mutual-Information (MI) selection** — for each remaining feature,
+2. **Mutual-Information (MI) selection** - for each remaining feature,
    measure how much knowing it reduces uncertainty about the PXRD
    class. Keep the top-K MI features. Two separate budgets are used:
    - One for **discrete** features (fingerprints, one-hot columns). These are
@@ -220,8 +220,8 @@ most of the time, which is useless.
 **SMOTE** (Synthetic Minority Oversampling Technique) generates
 synthetic examples of the minority classes by interpolating between
 existing minority points in the feature space. It's only applied
-**inside the training fold** during cross-validation — never on the
-validation set — so the reported metrics still reflect real held-out
+**inside the training fold** during cross-validation - never on the
+validation set - so the reported metrics still reflect real held-out
 performance, not memorized synthetic points.
 """
     )
@@ -238,7 +238,7 @@ Instead, the pipeline:
 
 1. Builds a **2D UMAP embedding** of the MI-filtered features so
    chemically-similar experiments cluster together.
-2. Runs **KMeans** on that embedding — sweeping k ∈ [8, 30) and picking
+2. Runs **KMeans** on that embedding - sweeping k ∈ [8, 30) and picking
    the value that maximizes silhouette score subject to having at least
    5 crystalline samples per validation fold.
 3. Uses those clusters as **groups** in `RepeatedStratifiedGroupKFold`,
@@ -254,11 +254,11 @@ Amorphous → Partial → Crystalline is an **ordered** class structure. Getting
 Amorphous is worse than misclassifying it as Partial. A standard
 classifier ignores that ordering.
 
-**Frank–Hall ordinal decomposition** handles this by training K−1 = 2
+**Frank-Hall ordinal decomposition** handles this by training K−1 = 2
 binary classifiers on cumulative thresholds:
 
-- Model A: **P(score > 0)** — is this at least Partial?
-- Model B: **P(score > 1)** — is this Crystalline?
+- Model A: **P(score > 0)** - is this at least Partial?
+- Model B: **P(score > 1)** - is this Crystalline?
 
 The three class probabilities are recovered from differences:
 
@@ -292,7 +292,7 @@ The **CL embedding** is a small MLP encoder pretrained with **triplet
 contrastive loss**: it learns to pull Crystalline experiments close
 together in embedding space and push Partial/Amorphous experiments
 away. Concatenating that embedding next to (or in place of) the MI
-features sometimes helps the downstream classifier, sometimes doesn't —
+features sometimes helps the downstream classifier, sometimes doesn't -
 that's why we keep all three flavors and let the CV pick the winner.
 """
     )
@@ -315,7 +315,7 @@ checkpoint is what BO loads on the Recommend page.
 st.divider()
 
 
-# ── Section 3: Why LFBO-SSL is the default acquisition function ──────────────
+# -- Section 3: Why LFBO-SSL is the default acquisition function ---
 st.subheader("Acquisition Function")
 
 st.markdown(
@@ -354,7 +354,7 @@ mean (exploitation) and the predicted standard deviation (exploration)
 analytically. It's the standard textbook acquisition.
 
 However, the PXRD score (Crystallinity Index) is not a Gaussian
-variable. It's a **bounded 0–9 ordinal**, heavily skewed toward the
+variable. It's a **bounded 0-9 ordinal**, heavily skewed toward the
 Amorphous end. Fitting a Gaussian over a score that's hard-capped at 0
 and 9, and concentrated near 0, insures that EI is miscalibrated.
 
@@ -371,7 +371,7 @@ BO problem into a **binary classification problem**. Can you predict that an
 experiment will fall into one of two bins.
 
 1. Pick a quantile γ (default **γ = 0.25** in COMPASS) and let τ be the
-   (1 − γ) quantile of observed scores — roughly, the top 25% threshold
+   (1 − γ) quantile of observed scores - roughly, the top 25% threshold
    in what's been seen so far.
 2. Re-label each observed experiment: **z = 1 if y ≥ τ** ("a hit"),
    **z = 0 otherwise**. (The experiment is in the top γ of experiments)
@@ -395,16 +395,16 @@ with st.expander("LFBO-SSL: an improvement",
 Standard LFBO has one critical weakness for our use case: **the
 classifier is trained only on the experiments that have actually been
 observed**. In a fresh BO run on a new target chemistry, the
-initialization set is often just **10–30 experiments**. That's far too
+initialization set is often just **10-30 experiments**. That's far too
 few to train a stable Random-Forest classifier as done by Yaghi et al. (https://doi.org/10.1021/acscentsci.3c01087), and the resulting
-acquisition rankings are noisy — small changes in a single observed
+acquisition rankings are noisy - small changes in a single observed
 point can completely reorder the top-K picks.
 
 **LFBO-SSL (Semi-Supervised LFBO)** fixes this by **borrowing
 information from the regression surrogate** to pseudo-label the
 unevaluated candidate pool:
 
-1. The regression surrogate (the Frank–Hall ordinal model from
+1. The regression surrogate (the Frank-Hall ordinal model from
    Section 2) predicts (μ, σ) for every candidate in the pool.
 2. Each candidate gets a **pseudo-binary-label**: z = 1 if μ ≥ τ,
    z = 0 otherwise.
@@ -417,7 +417,7 @@ unevaluated candidate pool:
      `config.BO_LFBO_SSL_PSEUDO_WEIGHT`) controls how much overall
      trust we give pseudo-labels vs. real ones.
 4. **LFBO-EI improvement weighting** is then applied on the
-   pseudo-positives, mirroring the observed-side scheme — so a
+   pseudo-positives, mirroring the observed-side scheme - so a
    candidate with a *confidently very high* μ has higher pull than a
    *confidently mid-range* μ.
 5. The classifier is trained on the **union** of real labels
@@ -446,20 +446,20 @@ target; **SSL allows us to experiment with novel ideas.**
 with st.expander("When to override the default with a different acquisition"):
     st.markdown(
         """
-- **EI** — only when the regression surrogate has been verified to be
+- **EI** - only when the regression surrogate has been verified to be
   well-calibrated and roughly Gaussian over the candidate pool (rare
   for ordinal PXRD; useful as a comparison baseline on BO Tools).
-- **Thompson sampling** — gives batches with implicit diversity by
+- **Thompson sampling** - gives batches with implicit diversity by
   sampling from the tree ensemble, at the cost of noisier per-pick
   selection. Useful when you want to deliberately broaden the search.
-- **Consensus (LFBO ∩ EI)** — only picks candidates that both methods
+- **Consensus (LFBO ∩ EI)** - only picks candidates that both methods
   agree are worth running. Aggressive and conservative; useful mainly
   to validate that two methods are pointing at the same chemistry.
-- **Random** — for sanity-check baselines only; use if you want random
+- **Random** - for sanity-check baselines only; use if you want random
 suggestions for some reason.
 
 For real lab use in this project, the default chain is:
-**Frank–Hall ordinal surrogate (RF or XGB) → LFBO-SSL → diverse-greedy
+**Frank-Hall ordinal surrogate (RF or XGB) → LFBO-SSL → diverse-greedy
 batch selection.**
 """
     )
@@ -467,7 +467,7 @@ batch selection.**
 st.divider()
 
 
-# ── Section 4: How to choose a surrogate (precision-first) ───────────────────
+# -- Section 4: How to choose a surrogate (precision-first) ---
 st.subheader("How to choose a surrogate")
 
 st.markdown(
@@ -507,21 +507,21 @@ with c2:
 
 When comparing two candidate surrogates, look at:
 
-1. **Precision–Recall (PR) curve, top-left corner** — at the
+1. **Precision-Recall (PR) curve, top-left corner** - at the
    precisions we care about (say, ≥ 0.7 or .8 for the Crystalline class),
    which model maintains the highest recall? That is, which model retains a high prediction accuracy, while still being able to find crystalline candidates. A model that hits 80%
    precision at 30% recall is great for BO; it gives us a small but
    reliable pool of suggestions.
-2. **Confusion matrix, "Crystalline" row** — what fraction of true
+2. **Confusion matrix, "Crystalline" row** - what fraction of true
    Crystalline experiments is the model correctly placing in the
    Crystalline column? (Recall.) And of everything *predicted*
    Crystalline, what fraction is actually Crystalline? (Precision.)
 3. **ROC AUC** is useful as a sanity check, but it weights both classes
    equally. This should be disregarded when making a decision.
-4. **QWK** — still a good summary metric and the one Optuna tunes
+4. **QWK** - still a good summary metric and the one Optuna tunes
    against, but use it as a **tie-breaker**, not the primary criterion.
    Two models with similar QWK can have very different PR curves.
-5. **Calibration** — if the model says "80% confident this is
+5. **Calibration** - if the model says "80% confident this is
    Crystalline" but is only right 50% of the time at that probability
    bin, the acquisition function will be misled. Check the calibration
    plots on the *Model Confidence* page.
@@ -540,7 +540,7 @@ _roc_path = os.path.join(_PROJECT_ROOT, "roc_prc_comparison.png")
 if os.path.exists(_roc_path):
     st.image(_roc_path,
              caption=("ROC and PR curves for all six trained pipelines. "
-                      "For our use case, focus on the PR plot — and "
+                      "For our use case, focus on the PR plot - and "
                       "specifically the region where precision ≥ 0.7."),
              width="stretch")
 
@@ -557,7 +557,7 @@ if os.path.exists(_cm_path):
 st.divider()
 
 
-# ── Section 4: Reading the learning curves ───────────────────────────────────
+# -- Section 4: Reading the learning curves ---
 st.subheader("Learning Curve")
 
 st.markdown(
@@ -575,7 +575,7 @@ st.markdown(
 
 - If the validation curve (vc) (orange) is still rising at the right edge → the model is **data-limited**.
   More experiments will improve it. This is a good sign for early
-  stages of the project — there's room to grow.
+  stages of the project - there's room to grow.
 - If the vc plateaus at the right edge → the model has **extracted what
   it can** from this feature set. More of the same kind of data will
   not help; only new feature engineering, a different model class, or
@@ -594,7 +594,7 @@ st.markdown(
 
 #### Surrogate-specific things to watch for
 
-- **RF variants** plateau earlier than XGB variants — random forests
+- **RF variants** plateau earlier than XGB variants - random forests
   are bias-limited on small datasets but rarely overfit. If RF is
   already flat and XGB is still rising at our current dataset size,
   XGB is the better long-term bet.
@@ -603,7 +603,7 @@ st.markdown(
   CL+MI curve is a sign the encoder isn't carrying enough information
   on its own.
 - **MI-only variants** are the most interpretable baseline. If they
-  match or beat the CL variants, prefer them — fewer moving parts,
+  match or beat the CL variants, prefer them - fewer moving parts,
   easier to debug, easier to SHAP.
 
 #### Rule of Thumb
@@ -623,31 +623,31 @@ if os.path.exists(_lc_path):
                       "width."),
              width="stretch")
 else:
-    st.caption("`learning_curves_qwk.png` not found — generate it by "
+    st.caption("`learning_curves_qwk.png` not found - generate it by "
                "running the training pipeline from the **Retrain Model** "
                "page.")
 
 st.divider()
 
 
-# ── Section 5: Quick checklist ───────────────────────────────────────────────
+# -- Section 5: Quick checklist ---
 st.subheader("Checklist")
 
 st.markdown(
     """
 Run through this list when deciding which surrogate to deploy for BO:
 
-1. **PR curve at precision ≥ 0.7** — which model has the higher recall
+1. **PR curve at precision ≥ 0.7** - which model has the higher recall
    there?
-2. **Confusion matrix, Crystalline column** — how clean is it? Few
+2. **Confusion matrix, Crystalline column** - how clean is it? Few
    Amorphous-mis-labeled-as-Crystalline = trustworthy positive picks.
 3. **Calibration plot** Ensure that acquistion functions are well balanced.
-4. **Learning curve** — is the model still improving with data, or
+4. **Learning curve** - is the model still improving with data, or
    plateaued? Plateau ≠ bad, but it should inform whether to spend a
    retraining round on this surrogate or invest in feature work.
-5. **QWK as a tiebreaker** — only when the four criteria above are
+5. **QWK as a tiebreaker** - only when the four criteria above are
    roughly tied.
-6. **SHAP sanity check** — do the top features make chemical sense?
+6. **SHAP sanity check** - do the top features make chemical sense?
    (See the SHAP outputs on the Model Confidence page.) A surrogate
    whose top driver is, say, a near-constant fingerprint bit is a
    surrogate to distrust regardless of its QWK.
@@ -657,7 +657,7 @@ Run through this list when deciding which surrogate to deploy for BO:
 st.caption(
     "All plots referenced on this page are regenerated when you run the "
     "training pipeline (Retrain Model page → *Retrain model*). For the "
-    "full technical writeup — including ordinal Frank–Hall math, SHAP "
-    "computation, and BO acquisition functions — see `README.md` in the "
+    "full technical writeup - including ordinal Frank-Hall math, SHAP "
+    "computation, and BO acquisition functions - see `README.md` in the "
     "repository root."
 )

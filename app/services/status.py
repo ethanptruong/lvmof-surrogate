@@ -1,4 +1,4 @@
-"""Read-only status helpers — dataset stats, BO history, model freshness.
+"""Read-only status helpers - dataset stats, BO history, model freshness.
 
 Backs the Home page and the Model-Confidence page.  All paths are resolved
 relative to the project root, which is the parent of the ``app/`` directory.
@@ -16,7 +16,7 @@ import pandas as pd
 
 from config import BO_CHECKPOINT_DIR, DATA_FILE_PATH
 
-# ── Path constants ───────────────────────────────────────────────────────────
+# -- Path constants ---
 PROJECT_ROOT      = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CHECKPOINT_DIR    = os.path.join(PROJECT_ROOT, "checkpoints")
 # The BO loop's BOCheckpointer writes its state under ``checkpoints/bo/`` (see
@@ -77,7 +77,7 @@ class ModelStatus:
     tuned_at: Optional[datetime]
 
 
-# ── Loaders ──────────────────────────────────────────────────────────────────
+# -- Loaders ---
 
 def dataset_summary() -> DatasetSummary:
     """Read the experiment Excel file and return basic stats.
@@ -216,7 +216,7 @@ def shap_csv_index() -> list[ShapCsvEntry]:
       ``shap_importance_{pipe_slug}_{kind}.csv`` where ``pipe_slug`` is
       ``pipe_label.replace(" ", "_").replace("|", "-")`` and ``kind`` is
       ``aggregated`` / ``threshold_0`` / ``threshold_1``.
-    - Notebook cell (current ``evaluation.py`` plotting helper):
+    - Current (``evaluation.py`` plotting helper):
       ``shap_named_{safe_label}.csv`` where ``safe_label`` only strips
       shell-unsafe characters from the pipe label (spaces and pipes
       survive as themselves and become ``  _``).
@@ -241,7 +241,7 @@ def shap_csv_index() -> list[ShapCsvEntry]:
         # Strip prefix + ``.csv`` so we can decode the pipe label.
         if fname.startswith("shap_importance_"):
             stem = fname[len("shap_importance_"):-len(".csv")]
-            # Legacy slug: "RF__-_MI_only_aggregated" — chop the kind suffix.
+            # Legacy slug: "RF__-_MI_only_aggregated" - chop the kind suffix.
             for kind in ("_aggregated", "_threshold_0", "_threshold_1"):
                 if stem.endswith(kind):
                     stem = stem[:-len(kind)]

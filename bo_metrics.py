@@ -1,5 +1,5 @@
 """
-bo_metrics.py — Simulation metrics and visualization for BO benchmarking.
+bo_metrics.py - Simulation metrics and visualization for BO benchmarking.
 
 All success metrics use a single threshold-based criterion: a "hit" is a row
 with pxrd_score >= config.BO_HIT_THRESHOLD (default 7.0, crystalline product).
@@ -7,21 +7,21 @@ This unifies the acquisition target, the gamma sweep, and the headline AF/EF
 numbers around the same scientific definition of success.
 
 Classes:
-  SimulationMetrics — AF, EF, hit-discovery rate, simple regret tracking
+  SimulationMetrics - AF, EF, hit-discovery rate, simple regret tracking
 
 Functions:
-  plot_convergence()              — cumulative best vs iteration
-  plot_average_score()            — rolling mean of selected scores vs iteration
-  plot_topk_curves()              — hit-discovery rate vs evaluations
-  plot_simple_regret()            — simple regret (y_best_possible - y_best_found) vs iteration
-  plot_af_ef_comparison()         — AF/EF bar charts across ablation conditions
-  plot_seed_aggregated_comparison() — mean ± std AF/EF/Hit% error bar chart across seeds
-  plot_sensitive_heatmap()        — acquisition × surrogate heatmap of mean AF
-  plot_seed_averaged_convergence() — convergence bands (mean ± std) collapsed over seeds
-  plot_batch_comparison()         — constant_liar vs kriging_believer
-  compute_surrogate_calibration() — z-score calibration check for surrogate sigma
-  plot_calibration()              — z-score histogram + coverage bar chart
-  save_simulation_results()       — CSV export of full history
+  plot_convergence()              - cumulative best vs iteration
+  plot_average_score()            - rolling mean of selected scores vs iteration
+  plot_topk_curves()              - hit-discovery rate vs evaluations
+  plot_simple_regret()            - simple regret (y_best_possible - y_best_found) vs iteration
+  plot_af_ef_comparison()         - AF/EF bar charts across ablation conditions
+  plot_seed_aggregated_comparison() - mean ± std AF/EF/Hit% error bar chart across seeds
+  plot_sensitive_heatmap()        - acquisition × surrogate heatmap of mean AF
+  plot_seed_averaged_convergence() - convergence bands (mean ± std) collapsed over seeds
+  plot_batch_comparison()         - constant_liar vs kriging_believer
+  compute_surrogate_calibration() - z-score calibration check for surrogate sigma
+  plot_calibration()              - z-score histogram + coverage bar chart
+  save_simulation_results()       - CSV export of full history
 """
 
 import os
@@ -36,35 +36,35 @@ from scipy.stats import norm as scipy_norm
 from config import BO_HIT_THRESHOLD
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # SimulationMetrics
-# ─────────────────────────────────────────────────────────────
+# ---
 class SimulationMetrics:
     """Threshold-based BO simulation metrics.
 
     All metrics share a single success criterion: y >= hit_threshold.
 
     Metrics:
-      AF       — Acceleration Factor: (fraction of pool-hits found) / (fraction
+      AF       - Acceleration Factor: (fraction of pool-hits found) / (fraction
                  of pool evaluated). AF=1 is random; >1 means BO finds hits
                  faster than uniform sampling. NaN when the pool contains no
                  hits (the metric is undefined, not zero).
-      EF       — Enhancement Factor (graded quality ratio):
+      EF       - Enhancement Factor (graded quality ratio):
                  mean(y_selected) / mean(y_pool). EF=1 is random;
-                 threshold-agnostic — captures graded selection quality that
+                 threshold-agnostic - captures graded selection quality that
                  the binary AF can miss (e.g. selections at y=6 vs y=3 both
                  count as misses for AF but differ in EF).
-      Hit%     — Fraction of BO selections with y >= threshold.
-      HitDisc% — Fraction of pool hits discovered after N evaluations.
-      Cumulative best, simple regret — convergence diagnostics.
+      Hit%     - Fraction of BO selections with y >= threshold.
+      HitDisc% - Fraction of pool hits discovered after N evaluations.
+      Cumulative best, simple regret - convergence diagnostics.
     """
 
     def __init__(self, y_all, hit_threshold=None):
         """
         Parameters
-        ----------
-        y_all         : array — all raw 0-9 pxrd_scores in the dataset
-        hit_threshold : float or None — y >= threshold counts as a hit.
+        ---
+        y_all         : array - all raw 0-9 pxrd_scores in the dataset
+        hit_threshold : float or None - y >= threshold counts as a hit.
                         Defaults to config.BO_HIT_THRESHOLD.
         """
         self.y_all = np.asarray(y_all, dtype=float)
@@ -83,7 +83,7 @@ class SimulationMetrics:
 
         Hits are restricted to candidates actually in the pool (excluding init),
         so random selection has an expected AF of 1.0. Returns NaN when the
-        pool contains no hits — the metric is undefined, not zero, and lumping
+        pool contains no hits - the metric is undefined, not zero, and lumping
         them as zeros biases aggregate means downward.
         """
         n_evaluated = len(selected_indices)
@@ -108,11 +108,11 @@ class SimulationMetrics:
         return frac_found / frac_evaluated if frac_evaluated > 0 else float("nan")
 
     def enhancement_factor(self, selected_indices, init_indices=None):
-        """EF = mean(y_selected) / mean(y_pool) — graded quality ratio.
+        """EF = mean(y_selected) / mean(y_pool) - graded quality ratio.
 
         Complements AF: AF measures *speed* of discovery at the binary
         hit_threshold; EF measures graded *quality* of selections vs the
-        pool's average score (threshold-agnostic by design — a hit-rate-based
+        pool's average score (threshold-agnostic by design - a hit-rate-based
         EF is algebraically equivalent to AF and would carry no new info).
 
         Pool-aware: excludes the init set from the baseline so a high-quality
@@ -164,7 +164,7 @@ class SimulationMetrics:
 
         Regret is computed against BO's own selections only (init set excluded).
         This avoids a flat-zero curve when the init set already contains the
-        global optimum — a common occurrence with large init fractions.
+        global optimum - a common occurrence with large init fractions.
 
         A well-performing BO should drive regret toward zero faster than random.
         """
@@ -218,22 +218,22 @@ class SimulationMetrics:
     def per_cluster_summary(self, history, groups):
         """Compute threshold-based AF, EF, Hit% per chemistry cluster.
 
-        For each cluster, metrics are computed *within* that cluster's pool —
+        For each cluster, metrics are computed *within* that cluster's pool -
         AF asks "did BO find this cluster's hits faster than uniform sampling?"
         EF asks "are BO's selections in this cluster richer in hits than the
         cluster's base rate?" Both share the global `hit_threshold`.
 
-        Returns NaN for AF/EF in clusters with no hits in the pool — the
+        Returns NaN for AF/EF in clusters with no hits in the pool - the
         metric is undefined there, and lumping those as zeros biases the
         aggregate downward.
 
         Parameters
-        ----------
+        ---
         history : dict from run_simulation
-        groups  : int array (n,) — cluster labels for the full dataset
+        groups  : int array (n,) - cluster labels for the full dataset
 
         Returns
-        -------
+        ---
         dict : {cluster_id: {"AF": float, "EF": float,
                               "hit_rate": float, "baseline_hit": float,
                               "hit_discovery_rate": float,
@@ -303,9 +303,9 @@ class SimulationMetrics:
         return results
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Plotting functions
-# ─────────────────────────────────────────────────────────────
+# ---
 def plot_convergence(histories, labels, y_all, save_path="docs/bo_convergence.png"):
     """Plot cumulative best vs iteration for multiple methods."""
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -331,14 +331,14 @@ def plot_average_score(histories, labels, window=10, save_path="docs/bo_avg_scor
     """Plot rolling mean of selected scores vs iteration.
 
     Unlike cumulative best, this shows whether BO is consistently selecting
-    better experiments over time — useful when the global best is found early
+    better experiments over time - useful when the global best is found early
     (flat cumulative-best curve) or to compare exploitation quality across methods.
 
     Parameters
-    ----------
+    ---
     histories : list of history dicts (must contain 'y_selected')
     labels    : list of str
-    window    : int — rolling window size (default 10)
+    window    : int - rolling window size (default 10)
     save_path : str
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -414,7 +414,7 @@ def plot_simple_regret(histories, labels, y_all, save_path="docs/bo_simple_regre
     ax.set_xlabel("BO Iteration")
     ax.set_ylabel("Simple Regret (y* − best BO selection)")
     ax.set_title("BO Simple Regret (lower = better)\n"
-                 "Regret relative to BO selections only — init set excluded")
+                 "Regret relative to BO selections only - init set excluded")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     ax.set_ylim(bottom=0)
@@ -436,13 +436,13 @@ def compute_surrogate_calibration(surrogate, X_test, y_test):
       - ~68% of points fall within 1σ, ~95% within 2σ
 
     Parameters
-    ----------
-    surrogate : RegressionSurrogate — already fitted surrogate
+    ---
+    surrogate : RegressionSurrogate - already fitted surrogate
     X_test    : array (n_test, n_features)
-    y_test    : array (n_test,) — true pxrd_scores
+    y_test    : array (n_test,) - true pxrd_scores
 
     Returns
-    -------
+    ---
     dict with keys:
       z_scores, mu, sigma, y_true,
       mean_z, std_z,
@@ -508,16 +508,16 @@ def plot_calibration(
 ):
     """Plot surrogate calibration diagnostics: z-score histogram + coverage curve.
 
-    Left panel  — z-score histogram with N(0,1) reference.
+    Left panel  - z-score histogram with N(0,1) reference.
                   A well-calibrated surrogate should look approximately normal.
 
-    Right panel — reliability diagram: observed coverage vs expected coverage at
+    Right panel - reliability diagram: observed coverage vs expected coverage at
                   each confidence level.  Perfect calibration = diagonal line.
                   Points above the diagonal → overconfident (sigma too small).
                   Points below → underconfident (sigma too large).
 
     Parameters
-    ----------
+    ---
     cal_dict      : dict returned by compute_surrogate_calibration()
     surrogate_name: str, used in plot title
     save_path     : output path
@@ -533,7 +533,7 @@ def plot_calibration(
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
-    # ── Left: z-score histogram ───────────────────────────────────────────────
+    # -- Left: z-score histogram ---
     z_clip = np.clip(z, -5, 5)
     ax1.hist(z_clip, bins=30, density=True, alpha=0.7, color="steelblue",
              label=f"Observed z-scores (n={cal_dict['n_valid']})")
@@ -556,11 +556,11 @@ def plot_calibration(
     )
     ax1.set_xlabel("Standardised residual  (y_true − μ) / σ")
     ax1.set_ylabel("Density")
-    ax1.set_title(f"Surrogate Calibration — {surrogate_name}\nZ-score Distribution")
+    ax1.set_title(f"Surrogate Calibration - {surrogate_name}\nZ-score Distribution")
     ax1.legend(loc="upper right", fontsize=9)
     ax1.grid(True, alpha=0.3)
 
-    # ── Right: reliability diagram ────────────────────────────────────────────
+    # -- Right: reliability diagram ---
     ax2.plot([0, 1], [0, 1], "r--", linewidth=1.5, label="Perfect calibration")
     ax2.plot(conf, obs_cov, "o-", color="steelblue", linewidth=2,
              markersize=5, label="Observed coverage")
@@ -580,7 +580,7 @@ def plot_calibration(
     )
     ax2.set_xlabel("Expected coverage (confidence level)")
     ax2.set_ylabel("Observed coverage")
-    ax2.set_title(f"Reliability Diagram — {surrogate_name}")
+    ax2.set_title(f"Reliability Diagram - {surrogate_name}")
     ax2.legend(loc="lower right", fontsize=8)
     ax2.grid(True, alpha=0.3)
     ax2.set_xlim(0, 1)
@@ -596,8 +596,8 @@ def plot_af_ef_comparison(summaries, save_path="docs/bo_af_ef.png"):
     """AF/EF bar charts across ablation conditions.
 
     Parameters
-    ----------
-    summaries : list of (label, summary_dict) — from SimulationMetrics.summary()
+    ---
+    summaries : list of (label, summary_dict) - from SimulationMetrics.summary()
     """
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
     labels = [s[0] for s in summaries]
@@ -644,7 +644,7 @@ def plot_seed_aggregated_comparison(
     are computed across the resulting groups.
 
     Parameters
-    ----------
+    ---
     summaries : list of (label, summary_dict)
     save_path : str
     """
@@ -714,7 +714,7 @@ def plot_sensitive_heatmap(
     Directly answers: for each acquisition, which surrogate works best?
 
     Parameters
-    ----------
+    ---
     summaries             : list of (label, summary_dict)
     sensitive_acquisitions: acquisitions to include (must use surrogate)
     metric                : 'AF' or 'EF'
@@ -756,7 +756,7 @@ def plot_sensitive_heatmap(
     ax.set_xticklabels(surrs, rotation=45, ha="right", fontsize=9)
     ax.set_yticks(range(len(acqs)))
     ax.set_yticklabels(acqs, fontsize=9)
-    ax.set_title(f"Mean {metric} — Acquisition × Surrogate\n(mean across seeds)")
+    ax.set_title(f"Mean {metric} - Acquisition × Surrogate\n(mean across seeds)")
 
     # Annotate cells
     for i in range(len(acqs)):
@@ -783,10 +783,10 @@ def plot_seed_averaged_convergence(
     initialisation doesn't clutter the chart.
 
     Parameters
-    ----------
+    ---
     histories : list of history dicts
     labels    : list of str in format 'acq|...|seed=N'
-    y_all     : array — full dataset scores (for simple regret)
+    y_all     : array - full dataset scores (for simple regret)
     metric    : 'avg_score' (cumulative mean of y_selected) or 'simple_regret'
     window    : rolling window for avg_score (ignored for simple_regret)
     save_path : str
@@ -828,11 +828,11 @@ def plot_seed_averaged_convergence(
 
     if metric == "simple_regret":
         ax.set_ylabel("Simple Regret (y* − best BO selection)")
-        ax.set_title("BO Simple Regret — Mean ± Std across Seeds")
+        ax.set_title("BO Simple Regret - Mean ± Std across Seeds")
         ax.set_ylim(bottom=0)
     else:
         ax.set_ylabel("Cumulative Mean Score")
-        ax.set_title("BO Selection Quality — Mean ± Std across Seeds")
+        ax.set_title("BO Selection Quality - Mean ± Std across Seeds")
 
     ax.set_xlabel("BO Iteration")
     ax.legend(fontsize=7, ncol=2, loc="best")
@@ -908,9 +908,9 @@ def save_full_history(history, label, save_path=None):
     print(f"[bo_metrics] Saved history → {save_path}")
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Multi-seed per-cluster and LOCO plots
-# ─────────────────────────────────────────────────────────────
+# ---
 
 def plot_per_cluster_bar(cluster_stats_by_seed, metric="AF",
                          save_path=None):
@@ -921,11 +921,11 @@ def plot_per_cluster_bar(cluster_stats_by_seed, metric="AF",
     counted as zero.
 
     Parameters
-    ----------
+    ---
     cluster_stats_by_seed : list[dict]
         Each element is the output of SimulationMetrics.per_cluster_summary(),
         one per seed.
-    metric : str — "AF", "EF", or "hit_discovery_rate"
+    metric : str - "AF", "EF", or "hit_discovery_rate"
     save_path : str or None
     """
     if save_path is None:
@@ -1053,7 +1053,7 @@ def plot_loco_bar(loco_results, metric="AF", save_path=None):
     "n/a" annotation rather than a misleading zero.
 
     Parameters
-    ----------
+    ---
     loco_results : dict {cluster_id: {"AF": ..., "EF": ..., "n_pool": ...}}
     metric : str
     save_path : str or None
@@ -1144,11 +1144,11 @@ def plot_loco_bar_multiseed(loco_results_by_seed, metric="AF", save_path=None):
     as a blank bar with an "n/a" annotation.
 
     Parameters
-    ----------
+    ---
     loco_results_by_seed : list[dict]
         Each element is a {cluster_id: {metric: ..., n_pool: ...}} dict
         produced by one LOCO run (one seed).
-    metric : str — "AF", "EF", or "hit_discovery_rate"
+    metric : str - "AF", "EF", or "hit_discovery_rate"
     save_path : str or None
     """
     if not loco_results_by_seed:
@@ -1324,7 +1324,7 @@ def plot_learning_curve(lc_results, save_path="docs/bo_learning_curve.png"):
     """Plot AF, EF, and Hit Rate vs number of initial experiments.
 
     Parameters
-    ----------
+    ---
     lc_results : list[dict]
         Each dict has keys: 'init_frac', 'n_init_mean', 'AF_mean', 'AF_std',
         'EF_mean', 'EF_std', 'hit_mean', 'hit_std', 'baseline_hit'

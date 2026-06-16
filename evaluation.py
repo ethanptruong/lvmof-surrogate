@@ -1,7 +1,6 @@
 """
 evaluation.py
 Evaluation and visualization: ROC/PRC, learning curves, confusion matrices, SHAP.
-All plot logic copied EXACTLY from the source notebook.
 """
 
 import numpy as np
@@ -67,16 +66,16 @@ def _partition_cv(cv):
                                 random_state=random_state)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # plot_roc_prc
-# ─────────────────────────────────────────────────────────────
+# ---
 def plot_roc_prc(pipelines, X, y, cv, groups,
                  positive_classes=None) -> None:
     """
     Generate ROC and precision-recall curves for each pipeline.
 
     Parameters
-    ----------
+    ---
     pipelines        : list of (name, pipe, n_jobs)
     positive_classes : list of int class ids (default [2])
     """
@@ -89,7 +88,7 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
     oof_pred_proba = {}
     summary_rows = []
 
-    print("\n─── Generating out-of-fold probabilities ─────────────────────────")
+    print("\n--- Generating out-of-fold probabilities ---")
     for name, pipe, n_jobs_cvpred in pipelines:
         print(f"Running: {name}")
         proba = cross_val_predict(
@@ -142,7 +141,7 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
 
         # ROC cosmetics
         ax_roc.plot([0, 1], [0, 1], linestyle="--", color="gray", lw=1)
-        ax_roc.set_title(f"ROC — {CLASS_LABELS.get(pos_class, pos_class)} vs Rest")
+        ax_roc.set_title(f"ROC - {CLASS_LABELS.get(pos_class, pos_class)} vs Rest")
         ax_roc.set_xlabel("False Positive Rate")
         ax_roc.set_ylabel("True Positive Rate")
         ax_roc.legend(fontsize=9)
@@ -151,7 +150,7 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
         # PR cosmetics
         ax_pr.axhline(prevalence, linestyle="--", color="gray", lw=1,
                       label=f"No-skill baseline = {prevalence:.3f}")
-        ax_pr.set_title(f"Precision-Recall — {CLASS_LABELS.get(pos_class, pos_class)} vs Rest")
+        ax_pr.set_title(f"Precision-Recall - {CLASS_LABELS.get(pos_class, pos_class)} vs Rest")
         ax_pr.set_xlabel("Recall")
         ax_pr.set_ylabel("Precision")
         ax_pr.legend(fontsize=9)
@@ -169,7 +168,7 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
           .reset_index(drop=True)
     )
 
-    print("\n─── AUC / AP summary ─────────────────────────────────────────────")
+    print("\n--- AUC / AP summary ---")
     for pos_class in POSITIVE_CLASSES:
         cls_name = CLASS_LABELS.get(pos_class, str(pos_class))
         sub = results_auc[results_auc["positive_class"] == pos_class].copy()
@@ -182,9 +181,9 @@ def plot_roc_prc(pipelines, X, y, cv, groups,
     print("\nSaved: roc_prc_auc_summary.csv")
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # plot_top_k_precision
-# ─────────────────────────────────────────────────────────────
+# ---
 def plot_top_k_precision(pipelines, X, y, cv, groups,
                          positive_class=2, k_values=None) -> None:
     """
@@ -211,7 +210,7 @@ def plot_top_k_precision(pipelines, X, y, cv, groups,
     summary_rows = []
     per_fold_rows = []
 
-    print(f"\n─── Computing top-k precision for {cls_name} ────────────────────")
+    print(f"\n--- Computing top-k precision for {cls_name} ---")
     for name, pipe, _ in pipelines:
         print(f"Running: {name}")
         prec_at_k = {k: [] for k in k_values}
@@ -271,14 +270,14 @@ def plot_top_k_precision(pipelines, X, y, cv, groups,
                  label=f"Random baseline = {prevalence:.3f}")
     ax_p.set_xlabel("k (# top picks)")
     ax_p.set_ylabel(f"Precision@k for {cls_name}")
-    ax_p.set_title(f"Top-k Precision — {cls_name} vs Rest")
+    ax_p.set_title(f"Top-k Precision - {cls_name} vs Rest")
     ax_p.set_ylim(0, 1.02)
     ax_p.legend(fontsize=9, loc="best")
     ax_p.grid(alpha=0.25)
 
     ax_h.set_xlabel("k (# top picks)")
     ax_h.set_ylabel(f"Hit-rate@k for {cls_name}")
-    ax_h.set_title(f"Top-k Hit Rate — ≥1 {cls_name} in top-k (BO-relevant)")
+    ax_h.set_title(f"Top-k Hit Rate - ≥1 {cls_name} in top-k (BO-relevant)")
     ax_h.set_ylim(0, 1.02)
     ax_h.legend(fontsize=9, loc="best")
     ax_h.grid(alpha=0.25)
@@ -293,7 +292,7 @@ def plot_top_k_precision(pipelines, X, y, cv, groups,
     print("Saved: top_k_precision_summary.csv")
     print("Saved: top_k_precision_per_fold.csv")
 
-    print(f"\n─── Top-k summary ({cls_name}) ───────────────────────────────────")
+    print(f"\n--- Top-k summary ({cls_name}) ---")
     pivot_p = summary_df.pivot(index="pipeline", columns="k",
                                values="precision_at_k_mean")
     pivot_h = summary_df.pivot(index="pipeline", columns="k",
@@ -304,16 +303,16 @@ def plot_top_k_precision(pipelines, X, y, cv, groups,
     print(pivot_h.to_string(float_format=lambda x: f"{x:.3f}"))
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # plot_learning_curves
-# ─────────────────────────────────────────────────────────────
+# ---
 def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
                          scoring_key="qwk", score_name="QWK") -> None:
     """
     Compute and plot learning curves for each pipeline.
 
     Parameters
-    ----------
+    ---
     pipelines    : list of (name, pipe, n_jobs)
     scoring_key  : key in scoring dict (default "qwk")
     score_name   : display label (default "QWK")
@@ -350,7 +349,7 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
         return out
 
     learning_curve_results = []
-    print("\n─── Computing learning curves ─────────────────────────────")
+    print("\n--- Computing learning curves ---")
     for name, pipe, n_jobs_lc in pipelines:
         print(f"Running: {name}")
         res = compute_learning_curve(name, pipe, n_jobs_lc)
@@ -404,7 +403,7 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
     lc_df.to_csv("learning_curve_summary_qwk.csv", index=False)
     print("Saved: learning_curve_summary_qwk.csv")
 
-    print("\n─── Learning curve summary (largest train size) ─────────────────")
+    print("\n--- Learning curve summary (largest train size) ---")
     final_rows = (
         lc_df.sort_values(["pipeline", "n_train"])
              .groupby("pipeline", as_index=False)
@@ -421,7 +420,7 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
             f"  Gap: {row['generalization_gap']:.4f}\n"
         )
 
-    print("\n─── Quick interpretation ───────────────────────────────────────")
+    print("\n--- Quick interpretation ---")
     for _, row in final_rows.iterrows():
         gap = row["generalization_gap"]
         if gap > 0.10:
@@ -433,22 +432,22 @@ def plot_learning_curves(pipelines, X, y, cv, groups, scoring,
         print(f"{row['pipeline']}: {flag}")
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # plot_confusion_matrices
-# ─────────────────────────────────────────────────────────────
+# ---
 def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
     """
     Generate raw-count and row-normalized confusion matrices for each pipeline.
 
     Parameters
-    ----------
+    ---
     pipelines : list of (name, pipe, n_jobs)
     """
     CLASS_LABELS = ["Amorphous", "Partial", "Crystalline"]
     CLASS_IDS = [0, 1, 2]
 
     oof_preds = {}
-    print("\n─── Generating out-of-fold predictions for confusion matrices ───")
+    print("\n--- Generating out-of-fold predictions for confusion matrices ---")
     for name, pipe, n_jobs_cvpred in pipelines:
         print(f"Running: {name}")
         y_pred = cross_val_predict(
@@ -503,7 +502,7 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
     count_tables = []
     norm_tables = []
 
-    print("\n─── Confusion matrices (counts) ─────────────────────────────────")
+    print("\n--- Confusion matrices (counts) ---")
     for name, _, _ in pipelines:
         cm = confusion_matrix(y, oof_preds[name], labels=CLASS_IDS)
         df_cm = pd.DataFrame(cm, index=[f"true_{c}" for c in CLASS_LABELS],
@@ -515,7 +514,7 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
         df_long.insert(0, "pipeline", name)
         count_tables.append(df_long)
 
-    print("\n─── Confusion matrices (row-normalized) ─────────────────────────")
+    print("\n--- Confusion matrices (row-normalized) ---")
     for name, _, _ in pipelines:
         cm_norm = confusion_matrix(y, oof_preds[name], labels=CLASS_IDS, normalize="true")
         df_cm_norm = pd.DataFrame(cm_norm, index=[f"true_{c}" for c in CLASS_LABELS],
@@ -534,15 +533,15 @@ def plot_confusion_matrices(pipelines, X, y, cv, groups) -> None:
     print("Saved: confusion_matrix_normalized.csv")
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # run_shap_analysis
-# ─────────────────────────────────────────────────────────────
+# ---
 def run_shap_analysis(pipes, X, y) -> None:
     """
     Run SHAP analysis for tree-based pipelines (XGBoost or RandomForest).
 
     Parameters
-    ----------
+    ---
     pipes : list of (label, pipe)
     X     : np.ndarray
     y     : np.ndarray
@@ -591,7 +590,7 @@ def run_shap_analysis(pipes, X, y) -> None:
 
     all_summary_rows = []
 
-    print("\n─── SHAP analysis for tree pipelines ────────────────────────────")
+    print("\n--- SHAP analysis for tree pipelines ---")
 
     _BAR_COLORS = {
         "XGB | MI only":          "tab:blue",
@@ -660,7 +659,7 @@ def run_shap_analysis(pipes, X, y) -> None:
             plot_name = f"shap_bar_{pipe_slug}_threshold_{threshold}.png"
             save_barplot(
                 top25,
-                title=f"{pipe_label} — Mean |SHAP| (threshold k={threshold})",
+                title=f"{pipe_label} - Mean |SHAP| (threshold k={threshold})",
                 filename=plot_name,
                 color=_BAR_COLORS.get(pipe_label, "tab:gray"),
             )
@@ -673,7 +672,7 @@ def run_shap_analysis(pipes, X, y) -> None:
                     max_display=20,
                     show=False
                 )
-                plt.title(f"{pipe_label} — SHAP beeswarm (threshold k={threshold})")
+                plt.title(f"{pipe_label} - SHAP beeswarm (threshold k={threshold})")
                 beeswarm_name = f"shap_beeswarm_{pipe_slug}_threshold_{threshold}.png"
                 plt.tight_layout()
                 plt.savefig(beeswarm_name, dpi=180, bbox_inches="tight")
@@ -698,12 +697,12 @@ def run_shap_analysis(pipes, X, y) -> None:
         agg_plot = f"shap_bar_{pipe_slug}_aggregated.png"
         save_barplot(
             top25_agg.rename(columns={"mean_abs_shap_avg_over_thresholds": "mean_abs_shap"}),
-            title=f"{pipe_label} — Aggregated Mean |SHAP| Across Frank-Hall Thresholds",
+            title=f"{pipe_label} - Aggregated Mean |SHAP| Across Frank-Hall Thresholds",
             filename=agg_plot,
             color=_AGG_COLORS.get(pipe_label, "tab:gray"),
         )
 
-    print("\n─── Combined SHAP comparison ────────────────────────────────────")
+    print("\n--- Combined SHAP comparison ---")
 
     df_combined = pd.concat(all_summary_rows, ignore_index=True)
     df_compare = (
@@ -744,7 +743,7 @@ def run_shap_analysis(pipes, X, y) -> None:
 
     plt.yticks(x, pivot_df.index)
     plt.xlabel("Mean |SHAP| averaged over ordinal thresholds")
-    plt.title("Top SHAP Features — Pipeline Comparison")
+    plt.title("Top SHAP Features - Pipeline Comparison")
     plt.legend(fontsize=8)
     plt.tight_layout()
     plt.savefig("shap_pipeline_comparison.png", dpi=180, bbox_inches="tight")
@@ -755,9 +754,9 @@ def run_shap_analysis(pipes, X, y) -> None:
     print("Saved: shap_pipeline_comparison.csv")
 
 
-# -----------------------------------------------------------------------------
+# ---
 # SECTION B  --  Propagate names through pipeline VT + [CL] + MI
-# -----------------------------------------------------------------------------
+# ---
 
 def transform_with_names(fitted_pipe, X_in, names_in, groups_in, label=""):
     # Run X through impute -> vt -> [cl] -> mi, tracking which features survive
@@ -850,9 +849,9 @@ def transform_with_names(fitted_pipe, X_in, names_in, groups_in, label=""):
     return Xt, names, grps
 
 
-# -----------------------------------------------------------------------------
+# ---
 # SECTION C  --  Colour palette (one colour per feature category)
-# -----------------------------------------------------------------------------
+# ---
 
 _GRP_PAL = {
     "Process Variables":          "#e63946",
@@ -895,9 +894,9 @@ def _pal(group):
     return _GRP_PAL.get(group, "#888888")
 
 
-# -----------------------------------------------------------------------------
+# ---
 # SECTION D  --  Main SHAP analysis + three-plot output per pipeline
-# -----------------------------------------------------------------------------
+# ---
 
 def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
                         fitted_pipe=None):
@@ -950,7 +949,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
     df_imp.to_csv(f"shap_named_{safe_label}.csv", index=False)
     print(f"  Saved: shap_named_{safe_label}.csv")
 
-    # ── Plot 1 -- Feature-group bar chart (SUM) ───────────────────────────
+    # -- Plot 1 -- Feature-group bar chart (SUM) ---
     # Total group importance -- larger groups will naturally score higher.
     # Useful for understanding raw predictive weight of each block.
     df_grp     = (df_imp.groupby("group")["mean_abs_shap"]
@@ -985,7 +984,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
         f"shap_group_{safe_label}.csv", index=False)
     print(f"  Saved: shap_group_{safe_label}.csv")
 
-    # ── Plot 1b -- Feature-group bar chart (MEAN, size-normalised) ────────
+    # -- Plot 1b -- Feature-group bar chart (MEAN, size-normalised) ---
     # Divides each group's total SHAP by the number of features in that group.
     # Answers: "which feature TYPE carries the most signal per individual
     # variable?" -- corrects for large blocks (SOAP, fingerprints) inflating
@@ -1022,7 +1021,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
         f"shap_group_avg_{safe_label}.csv", index=False)
     print(f"  Saved: shap_group_avg_{safe_label}.csv")
 
-    # ── Plot 2 -- Top-N individual features (bar, colour = category) ──────
+    # -- Plot 2 -- Top-N individual features (bar, colour = category) ---
     top_df  = df_imp.head(top_n).iloc[::-1]
     cols2   = [_pal(g) for g in top_df["group"]]
 
@@ -1044,7 +1043,7 @@ def run_shap_featurized(pipe_label, pipe, X, y, X_names, X_groups, top_n=15,
     plt.close("all")
     print(f"  Saved: shap_top{top_n}_{safe_label}.png")
 
-    # ── Plot 3 -- SHAP beeswarm (signed, top-N, avg over thresholds) ──────
+    # -- Plot 3 -- SHAP beeswarm (signed, top-N, avg over thresholds) ---
     top_feat_set = set(df_imp["feature"].iloc[:top_n])
     top_cols     = [i for i, nm in enumerate(feat_names)
                     if nm in top_feat_set][:top_n]

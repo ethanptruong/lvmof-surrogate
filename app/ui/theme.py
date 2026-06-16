@@ -7,7 +7,7 @@ pages import from here so that a rename only ever has to happen once.
 
 from __future__ import annotations
 
-# ── Color palette (kept in sync with .streamlit/config.toml) ─────────────────
+# -- Color palette (kept in sync with .streamlit/config.toml) ---
 PRIMARY        = "#2563eb"   # blue accent
 BACKGROUND     = "#ffffff"
 SECONDARY_BG   = "#f5f5f7"
@@ -19,7 +19,7 @@ ERROR          = "#dc2626"
 # Highlight color used to mark the top batch_size rows in result tables.
 TOP_PICK_BG    = "#dcfce7"   # very light green
 
-# ── Column → friendly label mapping ──────────────────────────────────────────
+# -- Column → friendly label mapping ---
 # Used by both the Recommend results panel and the Record-result form.
 FRIENDLY_LABELS: dict[str, str] = {
     # Recommendation outputs
@@ -70,7 +70,7 @@ def friendly_columns(cols) -> dict[str, str]:
     return {c: FRIENDLY_LABELS[c] for c in cols if c in FRIENDLY_LABELS}
 
 
-# ── PXRD score key ────────────────────────────────────────────────────────────
+# -- PXRD score key ---
 # Shown next to the PXRD input on the Record-result page.
 PXRD_KEY = (
     "**0\u20132** \u2014 amorphous  \u00a0\u00a0"

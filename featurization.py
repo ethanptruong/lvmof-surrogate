@@ -1,5 +1,5 @@
 """
-featurization.py — All featurization functions for the LVMOF-Surrogate pipeline.
+featurization.py - All featurization functions for the LVMOF-Surrogate pipeline.
 """
 
 import re
@@ -34,7 +34,7 @@ from config import (
 from data_processing import clean_smiles
 
 
-# ── Numpy patches for mordred compatibility ────────────────────────────────────
+# -- Numpy patches for mordred compatibility ---
 if not hasattr(np, 'float'):
     np.float = float
 if not hasattr(np, 'product'):
@@ -56,7 +56,7 @@ calc = Calculator(mordred_descriptors.Autocorrelation)
 num_descriptors = len(calc.descriptors)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# -- Helpers ---
 
 def finite(x, default=0.0):
     """Cast to float; replace NaN/inf/errors with default."""
@@ -76,18 +76,18 @@ def _f(x, default=0.0):
         return default
 
 
-# ── Metal descriptors (mendeleev) ─────────────────────────────────────────────
+# -- Metal descriptors (mendeleev) ---
 
 def get_metal_descriptors(symbol: str) -> dict:
     """
     Fetch atomic descriptors for a metal element using mendeleev.
     Returns a flat dict of float values. Missing values → 0.0.
-    All values are physically meaningful scalars — no hallucination risk.
+    All values are physically meaningful scalars - no hallucination risk.
     """
     try:
         el = mendeleev.element(symbol)
     except Exception:
-        # Unknown symbol — return all zeros with missing flag
+        # Unknown symbol - return all zeros with missing flag
         return {
             'metal_atomic_number':       0.0,
             'metal_period':              0.0,
@@ -201,7 +201,7 @@ def lookup_metal_descriptors(metal_symbol, metal_descriptor_cache, zero_descript
         return zero_descriptor
 
 
-# ── Oxidation state and CBC ───────────────────────────────────────────────────
+# -- Oxidation state and CBC ---
 
 def parse_oxidation_state(iupac_name: str) -> float:
     if not isinstance(iupac_name, str):
@@ -234,7 +234,7 @@ def get_d_electron_count(metal_symbol: str, oxidation_state: float) -> float:
 
         if metal_symbol in GROUP11_METALS:
             # d10s1 neutral: effective CBC d-count is 10 minus oxidation state
-            # BUG FIXED: NameError — 'oxidationstate' should be 'oxidation_state' (missing underscore, mismatches function parameter name)
+            # BUG FIXED: NameError - 'oxidationstate' should be 'oxidation_state' (missing underscore, mismatches function parameter name)
             d_count = 11 - int(oxidation_state) if oxidation_state >= 1 else 10
         else:
             # Standard CBC formula for groups 3-10 and 12
@@ -251,7 +251,7 @@ def get_cbc(iupac_name):
     return PRECURSOR_CBC.get(str(iupac_name).strip(), (0, 0))
 
 
-# ── Geometry ──────────────────────────────────────────────────────────────────
+# -- Geometry ---
 
 def get_precursor_geometry(smiles: str, metal_symbol: str, dcount: float):
     result = {f'precgeom_{g}': 0.0 for g in GEOMETRY_LABELS}  # ← uses GEOMETRY_LABELS
@@ -263,7 +263,7 @@ def get_precursor_geometry(smiles: str, metal_symbol: str, dcount: float):
             result['precgeom_unknown'] = 1.0
             return result, coordn
 
-        # ── Step 1: locate metal and check its degree ──────────────────────
+        # -- Step 1: locate metal and check its degree ---
         metal_degree = None
         for atom in mol.GetAtoms():
             if atom.GetSymbol() == metal_symbol:
@@ -274,7 +274,7 @@ def get_precursor_geometry(smiles: str, metal_symbol: str, dcount: float):
             result['precgeom_unknown'] = 1.0
             return result, coordn
 
-        # ── Step 2: choose coordination number source ───────────────────────
+        # -- Step 2: choose coordination number source ---
         if metal_degree > 0:
             coordn = float(metal_degree)
         else:
@@ -285,9 +285,9 @@ def get_precursor_geometry(smiles: str, metal_symbol: str, dcount: float):
             )
             coordn = float(n_ligand_frags)
 
-        # ── Step 3: assign geometry ─────────────────────────────────────────
+        # -- Step 3: assign geometry ---
         # FIX 1: strings now use underscores to match GEOMETRY_LABELS keys
-        # FIX 2: dcount == 8.0 only (not >= 8.0) — d10 Pd(0)/Ni(0) are tetrahedral
+        # FIX 2: dcount == 8.0 only (not >= 8.0) - d10 Pd(0)/Ni(0) are tetrahedral
         cn = int(coordn)
         if cn == 2:
             geom = 'linear'
@@ -310,7 +310,7 @@ def get_precursor_geometry(smiles: str, metal_symbol: str, dcount: float):
     return result, coordn
 
 
-# ── Morgan fingerprint ────────────────────────────────────────────────────────
+# -- Morgan fingerprint ---
 
 def generate_morgan_fp(smiles, n_bits=2048):
     """
@@ -423,7 +423,7 @@ def fp_zero_report(df, colmap, key="linker1", nbits=2048):
     return X, ok_flags, zero
 
 
-# ── Mordred RAC descriptors ───────────────────────────────────────────────────
+# -- Mordred RAC descriptors ---
 
 def _normalize_inventory_token(token: str):
     """Map obvious ions and return a SMILES-like string (or None if not usable)."""
@@ -481,7 +481,7 @@ def get_mordred_racs_smiles_with_stats(smiles):
         return np.zeros(num_descriptors, dtype=float), 1.0, 1.0
 
 
-# ── Metal center block (Block 16) ─────────────────────────────────────────────
+# -- Metal center block (Block 16) ---
 
 _METAL_PROPS_CACHE = {}
 
@@ -576,7 +576,7 @@ def get_metal_center_block(smiles: str,
     metal_sym = metal_atoms[0].GetSymbol()
     props = _get_mendeleev_props(metal_sym)
 
-    # Fill mendeleev properties (slots 0–15)
+    # Fill mendeleev properties (slots 0-15)
     for i, key in enumerate(_MENDELEEV_PROP_KEYS):
         out[i] = props[key]
 
@@ -587,7 +587,7 @@ def get_metal_center_block(smiles: str,
     # d-electron count in complex: d^n = group - oxidation_state
     # e.g. Rh(I) is group 9, d8; Pd(0) is group 10, d10
     group = props['group']
-    d_count = group - ox  # approximate, works for groups 8–12
+    d_count = group - ox  # approximate, works for groups 8-12
     d_count = max(0.0, min(10.0, d_count))
     out[17] = d_count
 
@@ -789,7 +789,7 @@ def get_complex_level_block(smiles: str) -> np.ndarray:
     return out
 
 
-# ── Physicochemical descriptors ───────────────────────────────────────────────
+# -- Physicochemical descriptors ---
 
 def get_physicochem_10(smiles):
     """
@@ -816,7 +816,7 @@ def get_physicochem_10(smiles):
 
     missing = 0.0
     try:
-        # KEY FIX: throwOnParamFailure=False — Si/Sn/Ge will get charge=0, not crash
+        # KEY FIX: throwOnParamFailure=False - Si/Sn/Ge will get charge=0, not crash
         AllChem.ComputeGasteigerCharges(mol, throwOnParamFailure=False)
         v = finite(Descriptors.MaxPartialCharge(mol))
         if not np.isfinite(v):
@@ -831,7 +831,7 @@ def get_physicochem_10(smiles):
     return out
 
 
-# ── TEP (Tolman Electronic Parameter) ────────────────────────────────────────
+# -- TEP (Tolman Electronic Parameter) ---
 
 _tepid_model = None
 _tep_features = None
@@ -866,7 +866,7 @@ def get_tepid_value(smiles):
             dtype=np.float64
         )   # shape (1, 19)
 
-        # Use booster_ directly — bypasses the broken sklearn wrapper
+        # Use booster_ directly - bypasses the broken sklearn wrapper
         tep_val = tepid_model.booster_.predict(x_input)[0]
         return [float(tep_val), 0.0]
 
@@ -875,7 +875,7 @@ def get_tepid_value(smiles):
         return [0.0, 1.0]
 
 
-# ── Sterics (Morfeus) ─────────────────────────────────────────────────────────
+# -- Sterics (Morfeus) ---
 
 DEBUG_STERICS = True
 _debug_errors = []  # collects tuples like (stage, smiles, exception_str)
@@ -1045,9 +1045,9 @@ def map_sterics_processed(df, src_col, prefix, processed_col, extra_remove=None)
     df[f"{prefix}_buried_vol"] = df[processed_col].map(lambda x: cache.get(x, (0.0, 0.0))[1])
 
 
-# ── ChemBERTa-2 ───────────────────────────────────────────────────────────────
+# -- ChemBERTa-2 ---
 
-print(f"Loading {CHEMBERTA_MODEL} …")
+print(f"Loading {CHEMBERTA_MODEL} ...")
 _cb_tok = AutoTokenizer.from_pretrained(CHEMBERTA_MODEL)
 _cb_mod = AutoModel.from_pretrained(CHEMBERTA_MODEL)
 _cb_mod.eval()
@@ -1085,13 +1085,13 @@ def chemberta_feature_names(prefix):
     return [f"{prefix}_bert_{i}" for i in range(BERT_DIM)]
 
 
-# ── Extended RDKit descriptors ────────────────────────────────────────────────
+# -- Extended RDKit descriptors ---
 
 # Pre-compile patterns once
 _SMARTS = {k: Chem.MolFromSmarts(v) for k, v in _SMARTS_RAW.items()}
 _N_SMARTS = len(_SMARTS)  # 20
 
-_N_BASE   = 28          # indices 0–27
+_N_BASE   = 28          # indices 0-27
 _N_TOTAL  = _N_BASE + _N_SMARTS + 2   # 28 + 20 + 2 = 50
 
 
@@ -1109,32 +1109,32 @@ def get_ext_rdkit(smiles):
         out[missing_idx] = 1.0
         return out
 
-    # ── Complexity / surface ────────────────────────────────────────────────
+    # -- Complexity / surface ---
     out[0]  = _f(Descriptors.BertzCT(mol))
     out[1]  = _f(Descriptors.MolMR(mol))
     out[2]  = _f(Descriptors.LabuteASA(mol))
     out[3]  = _f(Descriptors.FractionCSP3(mol))
 
-    # ── Valence connectivity (electronic topology) ─────────────────────────
+    # -- Valence connectivity (electronic topology) ---
     out[4]  = _f(Descriptors.Chi0v(mol))
     out[5]  = _f(Descriptors.Chi1v(mol))
     out[6]  = _f(Descriptors.Chi2v(mol))
     out[7]  = _f(Descriptors.Chi3v(mol))
     out[8]  = _f(Descriptors.Chi4v(mol))
 
-    # ── Shape indices ──────────────────────────────────────────────────────
+    # -- Shape indices ---
     out[9]  = _f(Descriptors.Kappa1(mol))
     out[10] = _f(Descriptors.Kappa2(mol))
     out[11] = _f(Descriptors.Kappa3(mol))
 
-    # ── Ring system ───────────────────────────────────────────────────────
+    # -- Ring system ---
     out[12] = _f(rdMolDescriptors.CalcNumAliphaticRings(mol))
     out[13] = _f(rdMolDescriptors.CalcNumSaturatedRings(mol))
     out[14] = _f(Descriptors.RingCount(mol))
     out[15] = _f(rdMolDescriptors.CalcNumBridgeheadAtoms(mol))
     out[16] = _f(rdMolDescriptors.CalcNumSpiroAtoms(mol))
 
-    # ── Partial charge distribution ───────────────────────────────────────
+    # -- Partial charge distribution ---
     try:
         AllChem.ComputeGasteigerCharges(mol, throwOnParamFailure=True)
         mn  = _f(Descriptors.MinPartialCharge(mol))
@@ -1146,14 +1146,14 @@ def get_ext_rdkit(smiles):
     except Exception:
         pass   # leave as 0 (no missing flag; Gasteiger failure is common for heteroatom-rich mols)
 
-    # ── Atom composition ──────────────────────────────────────────────────
+    # -- Atom composition ---
     out[20] = _f(rdMolDescriptors.CalcNumHeteroatoms(mol))
     out[21] = _f(Descriptors.NumRadicalElectrons(mol))
     out[22] = _f(Descriptors.NumValenceElectrons(mol))
     out[23] = _f(Descriptors.NOCount(mol))
     out[24] = _f(Descriptors.NHOHCount(mol))
 
-    # ── Normalized / derived ─────────────────────────────────────────────
+    # -- Normalized / derived ---
     mw   = _f(Descriptors.MolWt(mol))
     tpsa = _f(Descriptors.TPSA(mol))
     out[25] = tpsa / mw if mw > 0 else 0.0              # polarity per unit mass
@@ -1162,7 +1162,7 @@ def get_ext_rdkit(smiles):
     n_arom   = sum(1 for a in mol.GetAtoms() if a.GetIsAromatic())
     out[26]  = n_arom / n_atoms if n_atoms > 0 else 0.0  # aromatic fraction
 
-    # ── Coordination / binding site total (denticity proxy) ──────────────
+    # -- Coordination / binding site total (denticity proxy) ---
     coord_total = 0
     for k in _COORD_KEYS:
         patt = _SMARTS.get(k)
@@ -1170,7 +1170,7 @@ def get_ext_rdkit(smiles):
             coord_total += len(mol.GetSubstructMatches(patt))
     out[27] = float(coord_total)
 
-    # ── Individual SMARTS counts ──────────────────────────────────────────
+    # -- Individual SMARTS counts ---
     for j, (name, patt) in enumerate(_SMARTS.items()):
         if patt is not None:
             out[_N_BASE + j] = float(len(mol.GetSubstructMatches(patt)))
@@ -1205,7 +1205,7 @@ assert len(ext_rdkit_feature_names("x")) == _N_TOTAL, \
     f"Name count mismatch: {len(ext_rdkit_feature_names('x'))} vs {_N_TOTAL}"
 
 
-# ── 3D Shape ──────────────────────────────────────────────────────────────────
+# -- 3D Shape ---
 
 def get_3d_shape(smiles, n_conf=1):
     """
@@ -1276,7 +1276,7 @@ def get_3d_shape(smiles, n_conf=1):
     return out
 
 
-# ── VSA descriptors ───────────────────────────────────────────────────────────
+# -- VSA descriptors ---
 
 def get_vsa_descriptors(smiles):
     """34 VSA features: PEOE_VSA1-14, SlogP_VSA1-10, SMR_VSA1-10."""
@@ -1293,16 +1293,16 @@ def get_vsa_descriptors(smiles):
 
     for i in range(1, 11):
         fn = getattr(Descriptors, f"SlogP_VSA{i}", None)
-        if fn: out[13 + i]     = _f(fn(mol))   # indices 14–23
+        if fn: out[13 + i]     = _f(fn(mol))   # indices 14-23
 
     for i in range(1, 11):
         fn = getattr(Descriptors, f"SMR_VSA{i}", None)
-        if fn: out[23 + i]     = _f(fn(mol))   # indices 24–33
+        if fn: out[23 + i]     = _f(fn(mol))   # indices 24-33
 
     return out
 
 
-# ── Composition ───────────────────────────────────────────────────────────────
+# -- Composition ---
 
 def get_composition(smiles):
     """8 features: n_heavy, DBE, N/C, O/C, H/C, S_present, halogen_frac, MW_per_heavy."""
@@ -1342,7 +1342,7 @@ def get_composition(smiles):
     return out
 
 
-# ── MACCS keys + fragments ────────────────────────────────────────────────────
+# -- MACCS keys + fragments ---
 
 def get_maccs(smiles):
     out = np.zeros(167, dtype=np.float32)
@@ -1394,7 +1394,7 @@ def get_key_fragments(smiles):
     return out
 
 
-# ── G14 hub topology ──────────────────────────────────────────────────────────
+# -- G14 hub topology ---
 
 def _arms_from_hub(mol, hub_idx):
     """
@@ -1415,7 +1415,7 @@ def _arms_from_hub(mol, hub_idx):
             arms.append((rn_sym, 1, rn_idx))
             continue
 
-        # BFS through this arm only — don't cross back through hub
+        # BFS through this arm only - don't cross back through hub
         visited = {hub_idx, rn_idx}
         queue   = deque([(rn_idx, 1)])
         found   = None
@@ -1471,7 +1471,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
     25 features encoding the G14 hub and its arm topology.
 
     idx  name                  meaning
-    ---  --------------------  -------------------------------------------------
+    ---  ---  ---
     0    hub_present           1 if a G14 atom exists in molecule
     1    hub_degree            bonds on hub (degree 4 → tetratopic)
     2    hub_nCoordArms        arms reaching any coord site (topicity)
@@ -1488,7 +1488,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
     13   hub_eccentricity      max graph distance from hub to any atom
     14   hub_centrality        1/eccentricity (high → hub is topological center)
     15   hub_elem_eneg         Pauling electronegativity of hub element
-    16   hub_elem_covrad_pm    covalent radius (pm) — sets binding-site spacing
+    16   hub_elem_covrad_pm    covalent radius (pm) - sets binding-site spacing
     17   hub_elem_period       row in periodic table (3=Si, 4=Ge, 5=Sn, 6=Pb)
     18   hub_isSi              OHE identity flags
     19   hub_isGe
@@ -1512,7 +1512,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
     g14_atoms = [a for a in mol.GetAtoms() if a.GetSymbol() in GROUP14_SYMBOLS]
 
     if not g14_atoms:
-        return out  # all zeros, no missing flag — molecule simply has no G14
+        return out  # all zeros, no missing flag - molecule simply has no G14
 
     out[0] = 1.0
 
@@ -1521,7 +1521,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
     n_heavy  = mol.GetNumHeavyAtoms()
     out[23]  = len(g14_atoms) / n_heavy if n_heavy > 0 else 0.0
 
-    # ── Hub selection: highest-degree G14 atom (most arms) ─────────────────
+    # -- Hub selection: highest-degree G14 atom (most arms) ---
     hub      = max(g14_atoms, key=lambda a: a.GetDegree())
     hub_idx  = hub.GetIdx()
     hub_sym  = hub.GetSymbol()
@@ -1533,7 +1533,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
     for i, sym in enumerate(['Si', 'Ge', 'Sn', 'Pb']):
         out[18 + i] = float(hub_sym == sym)
 
-    # ── Graph eccentricity of hub ──────────────────────────────────────────
+    # -- Graph eccentricity of hub ---
     try:
         dist_row = rdmolops.GetDistanceMatrix(mol)[hub_idx]
         ecc      = float(np.max(dist_row))
@@ -1542,7 +1542,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
     except Exception:
         pass
 
-    # ── Arm topology ──────────────────────────────────────────────────────
+    # -- Arm topology ---
     arms = _arms_from_hub(mol, hub_idx)
 
     if arms:
@@ -1578,7 +1578,7 @@ def get_g14_hub_topology(smiles: str) -> np.ndarray:
 assert len(G14_HUB_NAMES) == 25
 
 
-# ── G14 SMARTS features ───────────────────────────────────────────────────────
+# -- G14 SMARTS features ---
 
 G14_SMARTS = {k: Chem.MolFromSmarts(v) for k, v in G14_SMARTS_RAW.items()}
 N_G14_SMARTS = len(G14_SMARTS)
@@ -1609,7 +1609,7 @@ def get_g14_smarts_features(smiles: str) -> np.ndarray:
     return out
 
 
-# ── TTP features ──────────────────────────────────────────────────────────────
+# -- TTP features ---
 
 _HUB_PROPS = {
     'Si': {'eneg': 1.90, 'cov_rad': 111, 'period': 3},
@@ -1688,7 +1688,7 @@ def _count_PPh2_groups(mol):
 def get_ttp_features(smiles: str) -> np.ndarray:
     """
     52-feature vector for tetratopic phosphine linkers.
-    Reliable for Si/Ge/Sn/C hubs — uses only 2D descriptors,
+    Reliable for Si/Ge/Sn/C hubs - uses only 2D descriptors,
     no Gasteiger charges, no 3D embedding.
     """
     out = np.zeros(TTP_DIM, dtype=float)
@@ -1715,7 +1715,7 @@ def get_ttp_features(smiles: str) -> np.ndarray:
                     break
 
     if not g14_atoms:
-        return out   # Not this linker type — all zeros, no missing flag
+        return out   # Not this linker type - all zeros, no missing flag
 
     hub = max(g14_atoms, key=lambda a: a.GetDegree())
     hub_idx = hub.GetIdx()
@@ -1822,10 +1822,10 @@ def get_ttp_features(smiles: str) -> np.ndarray:
     return out
 
 
-# ── Additional linker fingerprints ────────────────────────────────────────────
+# -- Additional linker fingerprints ---
 
 def get_atom_pair_fp(smiles, n_bits=2048):
-    """Hashed atom pair fingerprint — captures P···P through-bond distance."""
+    """Hashed atom pair fingerprint - captures P···P through-bond distance."""
     out = np.zeros(n_bits, dtype=np.float32)
     if not isinstance(smiles, str) or not smiles.strip():
         return out
@@ -1917,12 +1917,12 @@ def get_estate_fp(smiles):
         return np.zeros(79, dtype=float)
 
 
-# ── DRFP reaction fingerprint ─────────────────────────────────────────────────
+# -- DRFP reaction fingerprint ---
 
 def make_rxn_smiles(row):
     """
     Reactant side: precursor + linker + modulator (whatever is present).
-    Product side: empty — we are predicting the outcome, not encoding it.
+    Product side: empty - we are predicting the outcome, not encoding it.
     Prefers canonical SMILES; falls back to raw if canonical is unavailable.
     """
     parts = []
@@ -1935,7 +1935,7 @@ def make_rxn_smiles(row):
     return '.'.join(parts) + '>>' if parts else '>>'
 
 
-# ── SOAP 3D descriptors ───────────────────────────────────────────────────────
+# -- SOAP 3D descriptors ---
 
 from dscribe.descriptors import SOAP
 from ase import Atoms

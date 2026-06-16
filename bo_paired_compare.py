@@ -5,7 +5,7 @@ paired statistical comparison between two methods that share the same set of
 seeds (and, for surrogate-sensitive methods, the same surrogate).
 
 Defensibility
--------------
+---
 The comparison is **paired** by seed: each seed produces a (method_A, method_B)
 pair on identical init splits, so seed-to-seed variance is differenced out.
 This is much more powerful than comparing aggregate means.  We use a
@@ -13,7 +13,7 @@ one-sided Wilcoxon signed-rank test (``alternative="greater"``) to avoid
 Gaussianity assumptions on small n; report median delta + IQR + p-value.
 
 Decision rule (defensible default)
-----------------------------------
+---
 A method "wins" only if **all** of the following hold:
     1. n_seeds >= 10  (statistical power; warn otherwise)
     2. median delta > 0
@@ -23,7 +23,7 @@ A method "wins" only if **all** of the following hold:
 Anything weaker is reported as a tie.  Tie => prefer the simpler method.
 
 Usage
------
+---
     python bo_paired_compare.py \
         --csv docs/bo_ablation_results.csv \
         --method-a lfbo_ssl --method-b ei \
@@ -108,7 +108,7 @@ def select_runs(df: pd.DataFrame, acq: str,
     sub["seed"] = sub["seed"].astype(int)
     indexed = sub.set_index("seed")
 
-    # If multiple rows share a seed, the caller's filter is ambiguous —
+    # If multiple rows share a seed, the caller's filter is ambiguous -
     # typically means a surrogate-sensitive method was queried with
     # surrogate=None, so rows from every surrogate were returned.
     if indexed.index.has_duplicates:
@@ -285,7 +285,7 @@ def plot_paired_deltas(results: dict, df: pd.DataFrame,
         surr_str = f" (A={surr_a or 'none'} vs B={surr_b or 'none'})"
     for ax, metric in zip(axes, headline_metrics):
         if metric not in df.columns:
-            ax.set_title(f"{metric} — column missing")
+            ax.set_title(f"{metric} - column missing")
             continue
         a_vals = sub_a.loc[seeds, metric].astype(float).to_numpy()
         b_vals = sub_b.loc[seeds, metric].astype(float).to_numpy()

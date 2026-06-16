@@ -11,7 +11,7 @@ import streamlit as st
 from app.services.smiles_validator import SmilesCheck, render_png, validate
 from app.ui.theme import friendly_columns
 
-# ── Lab branding ─────────────────────────────────────────────────────────────
+# -- Lab branding ---
 # Resolve the lab logo once at import time. The components module lives at
 # ``app/ui/components.py``, so the project root is two parents up.
 _PROJECT_ROOT = os.path.dirname(
@@ -70,7 +70,7 @@ def smiles_input(label: str, key: str, *, required: bool, help_text: str = "") -
 
 
 def status_pill(label: str, *, ok: bool) -> None:
-    """Small colored badge — green for OK, amber for warning."""
+    """Small colored badge - green for OK, amber for warning."""
     color = "#16a34a" if ok else "#f59e0b"
     st.markdown(
         f'<span style="background:{color}22;color:{color};'
@@ -184,7 +184,7 @@ def about_panel() -> None:
             "### The problem\n"
             "Low-Valent Metal-Organic Frameworks (LVMOFs) are built from "
             "electron-rich, low-oxidation-state metals like Pd(0), Rh(I), "
-            "and Ir(I). They're notoriously hard to reproduce — small "
+            "and Ir(I). They're notoriously hard to reproduce - small "
             "changes in solvent ratio, temperature, stoichiometry, or "
             "modulator can flip the product from fully crystalline to "
             "completely amorphous. The Cohen Lab has accumulated hundreds "
@@ -198,9 +198,9 @@ def about_panel() -> None:
             "Given the ~750 historical experiments in "
             "`data/Experiments_with_Calculated_Properties_no_linker.xlsx`, "
             "the surrogate learns to predict the PXRD crystallinity "
-            "score (0–9, remapped to Amorphous / Partial / Crystalline) "
+            "score (0-9, remapped to Amorphous / Partial / Crystalline) "
             "from molecular + process descriptors. BO then uses those "
-            "predictions — together with the surrogate's uncertainty — "
+            "predictions - together with the surrogate's uncertainty - "
             "to suggest which experiment to run next.\n\n"
             "### How the surrogate is built\n"
             "- **Features (~10,000 raw, then MI-filtered):** metal-centre "
@@ -215,37 +215,37 @@ def about_panel() -> None:
             "- **Cross-validation:** RepeatedStratifiedGroupKFold with "
             "groups from KMeans on a 2D UMAP embedding, so chemically "
             "similar experiments don't leak across folds.\n"
-            "- **Models:** six Frank–Hall ordinal pipelines "
+            "- **Models:** six Frank-Hall ordinal pipelines "
             "(RF / XGB × MI-only / CL+MI / CL-only). Hyperparameters "
             "are tuned with Optuna (TPE, maximizing quadratic weighted "
             "kappa).\n\n"
             "### How Bayesian Optimization closes the loop\n"
-            "1. **Recommend** — you pick a linker/metal precursor/modulator "
+            "1. **Recommend** - you pick a linker/metal precursor/modulator "
             "on the Recommend page; the surrogate scores a generated "
             "candidate pool of process conditions and ranks the top "
             "batch by the chosen acquisition (LFBO / EI / Thompson).\n"
             "2. **Run the experiment** in the lab.\n"
-            "3. **Record Result** — enter the PXRD outcome; the "
+            "3. **Record Result** - enter the PXRD outcome; the "
             "Excel dataset is updated in place.\n"
-            "4. **Retrain Model** — refresh the surrogate on the new "
+            "4. **Retrain Model** - refresh the surrogate on the new "
             "data (re-evaluate is minutes, full Optuna retune is "
             "hours).\n"
             "5. Repeat.\n\n"
             "### Where to look for what\n"
-            "- **Recommend** — get next-experiment picks for a given "
+            "- **Recommend** - get next-experiment picks for a given "
             "linker/metal precursor/modulator.\n"
-            "- **Record Result** — log the PXRD outcome of a completed "
+            "- **Record Result** - log the PXRD outcome of a completed "
             "experiment.\n"
-            "- **Model Confidence** — surrogate calibration, "
+            "- **Model Confidence** - surrogate calibration, "
             "convergence, and BO performance plots.\n"
-            "- **BO Tools** — simulate (1 seed, fast) or evaluate "
+            "- **BO Tools** - simulate (1 seed, fast) or evaluate "
             "(multi-seed, per-cluster mean ± std) a BO configuration, "
             "reset recommend state, inspect checkpoints.\n"
-            "- **Retrain Model** — re-featurize or retrain after new "
+            "- **Retrain Model** - re-featurize or retrain after new "
             "data has been recorded.\n\n"
-            "For the full technical writeup — feature blocks, "
-            "dimensionality reduction, ordinal Frank–Hall decomposition, "
-            "evaluation metrics, and SHAP analysis — see `README.md` in "
+            "For the full technical writeup - feature blocks, "
+            "dimensionality reduction, ordinal Frank-Hall decomposition, "
+            "evaluation metrics, and SHAP analysis - see `README.md` in "
             "the repo."
         )
 

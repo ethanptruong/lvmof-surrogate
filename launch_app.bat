@@ -12,16 +12,16 @@ REM Output is shown in the terminal AND written to logs\app_<timestamp>.log.
 
 cd /d "%~dp0"
 
-REM ── Optional: activate environment ────────────────────────────────────────
+REM -- Optional: activate environment ---
 
 call .venv\Scripts\activate.bat
 
-REM ── Build timestamped log path ────────────────────────────────────────────
+REM -- Build timestamped log path ---
 if not exist logs mkdir logs
 for /f %%i in ('powershell -NoProfile -Command "Get-Date -Format yyyyMMdd_HHmmss"') do set TS=%%i
 set LOGFILE=logs\app_%TS%.log
 echo Logging to %LOGFILE%
 
-REM ── Run Streamlit (tee to terminal + log file) ────────────────────────────
+REM -- Run Streamlit (tee to terminal + log file) ---
 powershell -NoProfile -Command ^
     "& { streamlit run app\streamlit_app.py --server.port 8501 --server.address 0.0.0.0 --browser.gatherUsageStats false *>&1 | Tee-Object -FilePath '%LOGFILE%' }"

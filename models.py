@@ -37,9 +37,9 @@ warnings.filterwarnings(
 ORIGINAL_DISCRETE_MASK = None
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 1.  Ordinal Classifier
-# ─────────────────────────────────────────────────────────────
+# ---
 class FrankHallOrdinalClassifier(BaseEstimator, ClassifierMixin):
     _estimator_type = "classifier"
 
@@ -132,9 +132,9 @@ class FrankHallOrdinalClassifier(BaseEstimator, ClassifierMixin):
         return stacked.mean(axis=0), stacked.std(axis=0)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 1b.  Custom Stacking Classifier
-# ─────────────────────────────────────────────────────────────
+# ---
 class OrdinalStackingClassifier(BaseEstimator, ClassifierMixin):
     _estimator_type = "classifier"
 
@@ -180,9 +180,9 @@ class OrdinalStackingClassifier(BaseEstimator, ClassifierMixin):
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 2.  Scoring Metrics  (3-CLASS)
-# ─────────────────────────────────────────────────────────────
+# ---
 def qwk_0_9(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=int)
     y_pred = np.asarray(y_pred, dtype=int)
@@ -222,9 +222,9 @@ scoring_ordinal = {
 }
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 3.  Triplet Contrastive Learning
-# ─────────────────────────────────────────────────────────────
+# ---
 class _TripletEncoder(nn.Module):
     """MLP: input_dim → hidden_dim (BatchNorm + ReLU + Dropout(0.4)) → embedding_dim."""
 
@@ -246,16 +246,16 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
     """
     Sklearn-compatible triplet contrastive feature augmenter.
 
-    fit(X, y)    — trains _TripletEncoder via triplet margin loss.
+    fit(X, y)    - trains _TripletEncoder via triplet margin loss.
                    Anchors are crystalline samples (label=2).
                    Positives are other crystalline samples (label=2).
                    Negatives are sampled from negative_class
                    (1=partial/hard, 0=amorphous/easy).
-    transform(X) — returns [X | ℓ2-normalized embedding] when concat_original=True,
+    transform(X) - returns [X | ℓ2-normalized embedding] when concat_original=True,
                    or just the embedding when concat_original=False.
 
     Parameters
-    ----------
+    ---
     embedding_dim    : int    output embedding size (default 128)
     hidden_dim       : int    MLP hidden layer width (default 256)
     margin           : float  TripletMarginLoss margin (default 1.0)
@@ -475,9 +475,9 @@ class TripletTrainer(BaseEstimator, TransformerMixin):
         return emb
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 4.  AdaptiveSelectKBest
-# ─────────────────────────────────────────────────────────────
+# ---
 class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
     """
     SelectKBest that:
@@ -512,7 +512,7 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
             if len(mask) > n_features:
                 mask = mask[:n_features]
             elif len(mask) < n_features:
-                # Extra columns (shouldn't happen) — assume continuous
+                # Extra columns (shouldn't happen) - assume continuous
                 mask = np.r_[mask, np.zeros(n_features - len(mask), dtype=bool)]
             return mask
 
@@ -555,7 +555,7 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
             return max_k
         s /= s[0]
 
-        # Second derivative (curvature) — elbow is at the maximum
+        # Second derivative (curvature) - elbow is at the maximum
         d2 = np.diff(s, n=2)
         if len(d2) == 0:
             return max_k
@@ -627,9 +627,9 @@ class AdaptiveSelectKBest(BaseEstimator, TransformerMixin):
         return self.selector_.get_support(indices=indices)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 5.  Pipeline step builders
-# ─────────────────────────────────────────────────────────────
+# ---
 def _base_steps(with_cl: bool, n_chem_features=None) -> list:
     """
     Common feature prefix:
@@ -760,9 +760,9 @@ def _cl_only_steps(n_chem_features=None) -> list:
     return steps
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 6.  Pipeline factories
-# ─────────────────────────────────────────────────────────────
+# ---
 def make_rf_pipe(rf_params, with_cl=False, n_chem_features=None):
     return ImbPipeline(
         steps=_base_steps(with_cl=with_cl,
@@ -833,9 +833,9 @@ def make_xgb_pipe_cl_only(xgb_params, n_chem_features=None):
     )
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # 7.  Regression pipeline factories (for BO surrogate)
-# ─────────────────────────────────────────────────────────────
+# ---
 def _base_steps_regression(with_cl: bool, n_chem_features=None) -> list:
     """Feature prefix for regression.
 

@@ -25,7 +25,7 @@ from config import (BO_BATCH_SIZE, BO_DEFAULT_ACQUISITION,
                     BO_DEFAULT_SURROGATE, BO_N_ITERATIONS)
 
 
-# ── Default arg construction ──────────────────────────────────────────────────
+# -- Default arg construction ---
 # Field names mirror ``main.py``'s argparse parser exactly so that the same
 # Namespace can be passed straight to ``run_bo`` / ``_run_recommend``.
 def _default_args(**overrides: Any) -> argparse.Namespace:
@@ -64,7 +64,7 @@ def _resolve_batch_strategy(args: argparse.Namespace) -> None:
     )
 
 
-# ── Phase parser ──────────────────────────────────────────────────────────────
+# -- Phase parser ---
 # Map characteristic substrings printed by _run_recommend → friendly phases.
 # These are best-effort heuristics; the runner falls back to "Working..."
 # when none match.
@@ -91,7 +91,7 @@ def _phase_from_line(line: str) -> Optional[str]:
     return None
 
 
-# ── Background job state ──────────────────────────────────────────────────────
+# -- Background job state ---
 
 @dataclass
 class RunStatus:
@@ -172,7 +172,7 @@ def _run_in_thread(target: Callable[[], Any], status: RunStatus) -> None:
     t.start()
 
 
-# ── Public API ────────────────────────────────────────────────────────────────
+# -- Public API ---
 
 def start_recommend(
     *,
@@ -211,7 +211,7 @@ def start_recommend(
     def _target():
         from main import _run_recommend
         _run_recommend(args)
-        # The CSV path is deterministic — return it so the page can render it.
+        # The CSV path is deterministic - return it so the page can render it.
         from app.services.status import latest_recommendation_csv
         import json
         csv_path = latest_recommendation_csv()

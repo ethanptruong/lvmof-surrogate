@@ -1,5 +1,5 @@
 # What NOT to bake into the deployed image. (Fly builds from this local folder,
-# so this file — not .gitignore — decides what ships.)
+# so this file - not .gitignore - decides what ships.)
 
 # Version control, virtualenvs, caches
 .git
@@ -26,7 +26,7 @@ shap_cell_source.py
 # Model checkpoints are large and regenerable: after the first deploy, open the
 # Retrain Model page and click "Retrain" once to build the model on the volume.
 # (Remove this line if you'd rather bake your locally-trained model into the
-# image so the app works without retraining — at the cost of a much larger image.)
+# image so the app works without retraining - at the cost of a much larger image.)
 checkpoints
 
 # Data we do NOT want in the image: course PDFs, known-bad / backup spreadsheets,

@@ -1,13 +1,13 @@
 #!/usr/bin/env sh
 # COMPASS container entrypoint.
 #
-# Relocates the app's MUTABLE state — the experiment Excel, model checkpoints,
-# and generated docs — onto the mounted persistent volume so it survives
+# Relocates the app's MUTABLE state - the experiment Excel, model checkpoints,
+# and generated docs - onto the mounted persistent volume so it survives
 # restarts and redeploys.  Each directory is seeded from the image on FIRST
 # boot only; after that the volume copy is the source of truth.
 #
 # This is why no Python paths had to change: the app still reads/writes
-# ./data, ./checkpoints and ./docs as before — those are now symlinks to the
+# ./data, ./checkpoints and ./docs as before - those are now symlinks to the
 # persistent volume.
 set -eu
 

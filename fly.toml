@@ -1,7 +1,7 @@
-# fly.toml — COMPASS deployment config for Fly.io
+# fly.toml - COMPASS deployment config for Fly.io
 #
 # `app` must be globally unique across Fly. If "mof-compass" is taken, change it
-# (or let `fly launch` pick one). This is just Fly's internal name — your public
+# (or let `fly launch` pick one). This is just Fly's internal name - your public
 # address is still mof-compass.app, wired up separately with `fly certs`.
 app = "mof-compass"
 primary_region = "sjc"   # San Jose, closest to UCSD. See `fly platform regions`.
@@ -24,7 +24,7 @@ primary_region = "sjc"   # San Jose, closest to UCSD. See `fly platform regions`
   internal_port = 8501
   force_https = true
   # Always keep one machine running so chemists never hit a cold start.
-  # To cut cost (the app sleeps when idle, ~1–2 min wake-up on first hit),
+  # To cut cost (the app sleeps when idle, ~1-2 min wake-up on first hit),
   # set this to 0 and run: fly scale count 1
   min_machines_running = 1
   auto_stop_machines = "suspend"

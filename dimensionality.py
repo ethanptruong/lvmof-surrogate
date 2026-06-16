@@ -28,9 +28,9 @@ warnings.filterwarnings(
 )
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # RepeatedStratifiedGroupKFold
-# ─────────────────────────────────────────────────────────────
+# ---
 class RepeatedStratifiedGroupKFold:
     """
     Drop-in CV splitter that repeats StratifiedGroupKFold with different
@@ -38,7 +38,7 @@ class RepeatedStratifiedGroupKFold:
     so it works everywhere a StratifiedGroupKFold object does.
 
     Parameters
-    ----------
+    ---
     n_splits   : folds per repeat
     n_repeats  : number of independent shuffles
     random_state : base seed; repeat r uses seed = random_state + r
@@ -61,15 +61,15 @@ class RepeatedStratifiedGroupKFold:
         return self.n_splits * self.n_repeats
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # prepare_labels
-# ─────────────────────────────────────────────────────────────
+# ---
 def prepare_labels(df_merged, X_raw, mask=None):
     """
     Extract y from df_merged["pxrd_score"], apply finite mask to X and y.
 
     Returns
-    -------
+    ---
     X : np.ndarray  (masked)
     y : np.ndarray  (masked, int)
     mask : np.ndarray bool
@@ -89,11 +89,11 @@ def prepare_labels(df_merged, X_raw, mask=None):
     return X, y, mask
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # remap_score
-# ─────────────────────────────────────────────────────────────
+# ---
 def remap_score(s) -> int:
-    """Map raw pxrd_score (0–9) to 3-class label: 0=Amorphous, 1=Partial, 2=Crystalline."""
+    """Map raw pxrd_score (0-9) to 3-class label: 0=Amorphous, 1=Partial, 2=Crystalline."""
     if s <= 2:
         return 0
     if s <= 5:
@@ -101,25 +101,25 @@ def remap_score(s) -> int:
     return 2
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # apply_variance_threshold
-# ─────────────────────────────────────────────────────────────
+# ---
 def apply_variance_threshold(X) -> tuple:
     """
     Fit StandardScaler + KMeans + OHE + VarianceThreshold on X.
 
     Returns
-    -------
+    ---
     X_vt    : np.ndarray  post-VT features (includes cluster OHE)
     vt_pre  : fitted VarianceThreshold transformer (for backward compat)
-    fitted  : dict with keys {scaler, kmeans, ohe, vt} — persist these to reuse
+    fitted  : dict with keys {scaler, kmeans, ohe, vt} - persist these to reuse
               at inference time (e.g. BO target-chemistry re-featurization).
     """
-    print(f"[KMeans] Scaling X ({X.shape}) before clustering…")
+    print(f"[KMeans] Scaling X ({X.shape}) before clustering...")
     _scaler_km = StandardScaler()
     _X_scaled = _scaler_km.fit_transform(X)
 
-    print(f"[KMeans] Fitting k={N_CLUSTERS} clusters…")
+    print(f"[KMeans] Fitting k={N_CLUSTERS} clusters...")
     _km_pre = KMeans(n_clusters=N_CLUSTERS, random_state=RANDOM_STATE, n_init=10)
     cluster_labels_raw = _km_pre.fit_predict(_X_scaled)
 
@@ -152,13 +152,13 @@ def transform_variance_threshold(X, fitted) -> np.ndarray:
     feature space the surrogate was trained on.
 
     Parameters
-    ----------
-    X      : np.ndarray  shape (n, n_raw_features) — same column order as
+    ---
+    X      : np.ndarray  shape (n, n_raw_features) - same column order as
              training X_final (pre-cluster-OHE, pre-VT).
     fitted : dict with keys {scaler, kmeans, ohe, vt} from apply_variance_threshold.
 
     Returns
-    -------
+    ---
     X_vt : np.ndarray  shape (n, n_post_vt_features) aligned with training X_vt.
     """
     X_scaled    = fitted["scaler"].transform(X)
@@ -169,9 +169,9 @@ def transform_variance_threshold(X, fitted) -> np.ndarray:
     return X_vt
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Leakage-free variants for fold-local KMeans pipelines
-# ─────────────────────────────────────────────────────────────
+# ---
 def apply_variance_threshold_no_kmeans(X) -> tuple:
     """VT-only sibling of apply_variance_threshold.
 
@@ -180,14 +180,14 @@ def apply_variance_threshold_no_kmeans(X) -> tuple:
     the X-distribution leakage of fitting KMeans on the entire dataset.
 
     Returns
-    -------
+    ---
     X_vt : np.ndarray  post-VT features (chemistry only, no cluster OHE)
     fitted : dict {"vt": fitted VarianceThreshold}
         Returned as a dict so callers can swap with apply_variance_threshold's
         return shape; pass to transform_variance_threshold_no_kmeans for new
         rows at inference time.
     """
-    print(f"[VT-noKM] Fitting VarianceThreshold on X ({X.shape}) — "
+    print(f"[VT-noKM] Fitting VarianceThreshold on X ({X.shape}) - "
           f"no KMeans, fold-local clustering deferred to pipeline.")
     vt = VarianceThreshold(threshold=0.0)
     X_vt = vt.fit_transform(X)
@@ -198,7 +198,7 @@ def apply_variance_threshold_no_kmeans(X) -> tuple:
 
 def transform_variance_threshold_no_kmeans(X, fitted) -> np.ndarray:
     """Transform-only sibling of transform_variance_threshold for the
-    no-KMeans pipeline. Just applies VT — cluster OHE is added by the
+    no-KMeans pipeline. Just applies VT - cluster OHE is added by the
     in-pipeline KMeansFeatureAugmenter at predict time."""
     return fitted["vt"].transform(X)
 
@@ -208,28 +208,28 @@ class KMeansFeatureAugmenter(BaseEstimator, TransformerMixin):
 
     Drop-in replacement for the leaky pre-CV KMeans step in
     apply_variance_threshold. Fits StandardScaler + KMeans on the first
-    ``n_chem_features`` columns of X (chemistry features only — process
+    ``n_chem_features`` columns of X (chemistry features only - process
     variables and engineered interactions are excluded from the clustering),
     one-hot-encodes the cluster label, and appends the OHE columns to X.
 
     Place as the first non-impute step of an sklearn/imblearn pipeline so
     KMeans refits per CV fold and the cluster IDs assigned to validation
-    rows are not informed by their own X coordinates — eliminating the
+    rows are not informed by their own X coordinates - eliminating the
     X-distribution leakage that otherwise affects per-cluster / LOCO scores.
 
     Parameters
-    ----------
-    n_clusters : int — number of KMeans clusters (default: config.N_CLUSTERS)
+    ---
+    n_clusters : int - number of KMeans clusters (default: config.N_CLUSTERS)
     n_chem_features : int or None
         Number of leading columns of X that constitute chemistry features.
         If None, all columns are clustered. In the standard X_cv layout
         (X_vt | Xprocnorm | interactions), set this to ``X_vt.shape[1]``
         so process variables don't influence cluster centroids.
-    random_state : int — KMeans random state.
+    random_state : int - KMeans random state.
 
     Attributes (set after fit)
-    --------------------------
-    n_chem_in_ : int — chemistry-feature width seen during fit
+    ---
+    n_chem_in_ : int - chemistry-feature width seen during fit
     scaler_, kmeans_, ohe_ : fitted sub-transformers
     """
 
@@ -276,22 +276,22 @@ class KMeansFeatureAugmenter(BaseEstimator, TransformerMixin):
         return np.hstack([X, ohe])
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # run_mi_diagnostic
-# ─────────────────────────────────────────────────────────────
+# ---
 def run_mi_diagnostic(X_vt, y, discrete_mask=None):
     """
     Fit SelectKBest(MI) on X_vt for diagnostic purposes only.
     Does NOT transform X (no leakage).
 
     Parameters
-    ----------
+    ---
     discrete_mask : np.ndarray[bool] or None
         Per-column mask for X_vt: True = discrete, False = continuous.
         If None, falls back to True (all discrete, legacy behaviour).
 
     Returns
-    -------
+    ---
     mi_pre : fitted SelectKBest transformer
     """
     disc = True if discrete_mask is None else discrete_mask
@@ -305,20 +305,20 @@ def run_mi_diagnostic(X_vt, y, discrete_mask=None):
 
     print(f"After VarianceThreshold   : {X_vt.shape}")
     print(f"MI will select top-{MI_K} INSIDE each CV fold (no leakage)")
-    print(f"Diagnostic MI fit complete — cliff plot cell still works unchanged")
+    print(f"Diagnostic MI fit complete - cliff plot cell still works unchanged")
 
     return mi_pre
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # build_process_interactions
-# ─────────────────────────────────────────────────────────────
+# ---
 def build_process_interactions(df_merged, mask, process_cols_present) -> tuple:
     """
     Build normalized process variable matrix and pairwise interactions.
 
     Returns
-    -------
+    ---
     Xprocnorm    : np.ndarray  MinMaxScaled process vars (masked)
     interactions : np.ndarray  6-column interaction/polynomial features
     Xprocess_raw : np.ndarray  raw process vars (masked, for diagnostics)
@@ -345,15 +345,15 @@ def build_process_interactions(df_merged, mask, process_cols_present) -> tuple:
     return Xprocnorm, interactions, Xprocessraw
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # assemble_cv_matrix
-# ─────────────────────────────────────────────────────────────
+# ---
 def assemble_cv_matrix(X_vt, Xprocnorm, interactions) -> np.ndarray:
     """
     Concatenate VT-filtered features + process vars + interaction features.
 
     Returns
-    -------
+    ---
     X_cv : np.ndarray  ready for cross-validation
     """
     X = np.hstack([X_vt, Xprocnorm, interactions])
@@ -361,9 +361,9 @@ def assemble_cv_matrix(X_vt, Xprocnorm, interactions) -> np.ndarray:
     return X
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # remove_correlated_features
-# ─────────────────────────────────────────────────────────────
+# ---
 def remove_correlated_features(X: np.ndarray, threshold: float = 0.95) -> tuple:
     """
     Remove features whose absolute pairwise Pearson correlation exceeds
@@ -371,7 +371,7 @@ def remove_correlated_features(X: np.ndarray, threshold: float = 0.95) -> tuple:
     (upper-triangle scan), matching the behaviour of pandas .corr() drop logic.
 
     Returns
-    -------
+    ---
     X_out  : np.ndarray  decorrelated feature matrix
     mask   : np.ndarray  bool, True = kept
     """
@@ -385,16 +385,16 @@ def remove_correlated_features(X: np.ndarray, threshold: float = 0.95) -> tuple:
     return X[:, mask], mask
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # build_umap_embedding
-# ─────────────────────────────────────────────────────────────
+# ---
 def build_umap_embedding(X_for_umap) -> np.ndarray:
     """
     Fit a 2D UMAP embedding on X_for_umap (MI-filtered view).
-    Used for CV group assignment only — not fed to the model.
+    Used for CV group assignment only - not fed to the model.
 
     Returns
-    -------
+    ---
     X_2d : np.ndarray  shape (n, 2)
     """
     warnings.filterwarnings('ignore', message='Graph is not fully connected')
@@ -406,22 +406,22 @@ def build_umap_embedding(X_for_umap) -> np.ndarray:
     return X_2d
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # select_kmeans_groups
-# ─────────────────────────────────────────────────────────────
+# ---
 def select_kmeans_groups(X_2d, y, n_splits=3, n_repeats_tune=1, n_repeats_eval=5) -> tuple:
     """
     Sweep KMeans k values to find the best silhouette score while ensuring
     >= 5 crystalline samples in every CV validation fold.
 
     Returns
-    -------
+    ---
     groups   : np.ndarray  int cluster labels (n,)
     best_k   : int
     cv_tune  : RepeatedStratifiedGroupKFold  lightweight (1 repeat) for Optuna
     cv_eval  : RepeatedStratifiedGroupKFold  stable (n_repeats_eval repeats) for final eval
     """
-    print("\n─── KMeans cluster sweep ──────────────────────────────")
+    print("\n--- KMeans cluster sweep ---")
     print(f"{'k':>5} {'Silhouette':>12} {'Min class-2 in val':>20} {'Status':>12}")
 
     best_k, best_score = None, -1
@@ -445,7 +445,7 @@ def select_kmeans_groups(X_2d, y, n_splits=3, n_repeats_tune=1, n_repeats_eval=5
             best_score, best_k = sil, k
 
     if best_k is None:
-        print("\nNo k satisfied >=5 crystalline per fold — falling back to n_splits=3 …")
+        print("\nNo k satisfied >=5 crystalline per fold - falling back to n_splits=3 ...")
         for k in range(6, 20, 2):
             km = KMeans(n_clusters=k, random_state=RANDOM_STATE, n_init=10)
             labels_k = km.fit_predict(X_2d).astype(int)
@@ -483,17 +483,17 @@ def select_kmeans_groups(X_2d, y, n_splits=3, n_repeats_tune=1, n_repeats_eval=5
     return groups, best_k, cv_tune, cv_eval
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # plot_mi_cliff
-# ─────────────────────────────────────────────────────────────
+# ---
 def _cliff_suggested_cutoff(scores_sorted: np.ndarray) -> int:
     """Return the rank at which the MI cliff drops to near-noise.
 
     Uses two complementary heuristics and takes the more conservative
     (lower) of the two so the plot annotation is clearly visible:
 
-    1. 5%-of-peak threshold  — first rank where score < 0.05 × max
-    2. Second-derivative elbow — rank of maximum curvature in the
+    1. 5%-of-peak threshold  - first rank where score < 0.05 × max
+    2. Second-derivative elbow - rank of maximum curvature in the
        normalised score curve (same logic as AdaptiveSelectKBest._find_mi_elbow)
 
     Returns the suggested rank (1-indexed), capped at len(scores_sorted).
@@ -521,21 +521,21 @@ def plot_mi_cliff(mi_pre, discrete_mask=None) -> None:
     """Plot MI score cliff diagnostic, split by discrete vs continuous.
 
     When *discrete_mask* is supplied (a boolean array aligned to mi_pre.scores_)
-    the function produces two side-by-side panels — one for discrete features
-    (fingerprints, OHE, …) and one for continuous features (physico-chem,
-    SOAP, Mordred RAC, …).  Each panel shows the sorted MI score curve with
+    the function produces two side-by-side panels - one for discrete features
+    (fingerprints, OHE, ...) and one for continuous features (physico-chem,
+    SOAP, Mordred RAC, ...).  Each panel shows the sorted MI score curve with
     the current budget line and a suggested elbow cutoff.
 
     Without a mask the original single-panel behaviour is used.
 
     Parameters
-    ----------
+    ---
     mi_pre       : fitted SelectKBest (has .scores_ attribute)
-    discrete_mask: np.ndarray[bool] | None  — True = discrete column
+    discrete_mask: np.ndarray[bool] | None  - True = discrete column
     """
     scores = mi_pre.scores_
 
-    # ── helper that plots one panel ─────────────────────────────────────────
+    # -- helper that plots one panel ---
     def _panel(ax, scores_sub, label, current_k, color_k):
         sorted_s = np.sort(scores_sub)[::-1]
         n        = len(sorted_s)
@@ -556,7 +556,7 @@ def plot_mi_cliff(mi_pre, discrete_mask=None) -> None:
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
-    # ── two-panel mode ──────────────────────────────────────────────────────
+    # -- two-panel mode ---
     if discrete_mask is not None:
         disc  = np.asarray(discrete_mask, dtype=bool)
         # align mask length to scores length
@@ -574,15 +574,15 @@ def plot_mi_cliff(mi_pre, discrete_mask=None) -> None:
         fig, axes = plt.subplots(1, 2, figsize=(16, 5))
         _panel(axes[0], scores_disc, "Discrete features (FP / OHE / MACCS)",
                MI_K, 'blue')
-        _panel(axes[1], scores_cont, "Continuous features (physico-chem / SOAP / Mordred…)",
+        _panel(axes[1], scores_cont, "Continuous features (physico-chem / SOAP / Mordred...)",
                mi_k_cont, 'darkorange')
 
-        fig.suptitle("MI score cliffs — discrete vs continuous", fontsize=13)
+        fig.suptitle("MI score cliffs - discrete vs continuous", fontsize=13)
         plt.tight_layout()
         plt.savefig("mi_cliff.png", dpi=150)
         plt.close(fig)
 
-    # ── legacy single-panel mode ────────────────────────────────────────────
+    # -- legacy single-panel mode ---
     else:
         mi_scores_sorted = np.sort(scores)[::-1]
         suggest = _cliff_suggested_cutoff(mi_scores_sorted)
@@ -602,9 +602,9 @@ def plot_mi_cliff(mi_pre, discrete_mask=None) -> None:
         plt.close(fig)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # run_process_variable_diagnostics
-# ─────────────────────────────────────────────────────────────
+# ---
 def run_process_variable_diagnostics(
     df_merged,
     mask,
@@ -633,7 +633,7 @@ def run_process_variable_diagnostics(
 
     print(f"Process variable matrix: {Xprocess_raw.shape}")
     print(f"\n{'Feature':<35} {'Unique':>7} {'Min':>10} {'Max':>10} {'Mean':>10}")
-    print("─" * 75)
+    print("-" * 75)
     for i, col in enumerate(process_cols_present):
         col_data = Xprocess_raw[:, i]
         print(f"{col:<35} {len(np.unique(col_data)):>7d} "
@@ -663,9 +663,9 @@ def run_process_variable_diagnostics(
                 proc_in_vt_space[col] = int(vt_col[0])
 
     mi_support = mi_pre.get_support()
-    print(f"\n─── Process variable survival through VT + MI ─────────")
+    print(f"\n--- Process variable survival through VT + MI ---")
     print(f"{'Variable':<35} {'Survived VT':>12} {'Survived MI':>12}")
-    print("─" * 62)
+    print("-" * 62)
     for col in process_cols_present:
         sv = col in proc_in_vt_space
         sm = sv and mi_support[proc_in_vt_space[col]]
@@ -675,19 +675,19 @@ def run_process_variable_diagnostics(
         mi_support[proc_in_vt_space[c]]
         for c in process_cols_present if c in proc_in_vt_space
     )
-    print(f"\n{'─'*62}")
+    print(f"\n{'-'*62}")
     print(f"Process variables in final X ({MI_K} features): {n_proc_in_X} / {n_proc}")
     if n_proc_in_X == 0:
-        print("NO process variables reached Optuna — forcing inclusion below.")
+        print("NO process variables reached Optuna - forcing inclusion below.")
 
     mi_proc = mic(
         Xprocess_raw, y,
         discrete_features=False,
         random_state=RANDOM_STATE,
     )
-    print(f"\n─── Process variable MI scores (vs 3-class y) ─────────")
+    print(f"\n--- Process variable MI scores (vs 3-class y) ---")
     print(f"{'Variable':<35} {'MI Score':>10}  {'Signal?':>10}")
-    print("─" * 60)
+    print("-" * 60)
     for col, score in sorted(zip(process_cols_present, mi_proc),
                               key=lambda x: -x[1]):
         signal = "strong" if score > 0.05 else ("weak" if score > 0.01 else "noise")

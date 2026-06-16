@@ -1,6 +1,6 @@
 # Quarterly full retrain of the COMPASS surrogate model.
 #
-# Runs on GitHub's runners (4 CPU / 16 GB — faster than the Fly VM, and the
+# Runs on GitHub's runners (4 CPU / 16 GB - faster than the Fly VM, and the
 # live site stays responsive while it works). Pulls the CURRENT experiment
 # Excel off the Fly volume, re-tunes every pipeline from scratch on it, then
 # pushes the new checkpoints and evaluation figures back. The running app
@@ -12,11 +12,11 @@
 # those months; the guard job lets only the month's first one through.
 #
 # Manual runs (Actions tab -> Run workflow):
-#   full    — fresh Optuna search on the latest data (default; several hours)
-#   refresh — keep current hyperparameters; re-featurize, re-fit and
-#             regenerate all figures (took ~4.8 h on the 2026-06 test run —
+#   full    - fresh Optuna search on the latest data (default; several hours)
+#   refresh - keep current hyperparameters; re-featurize, re-fit and
+#             regenerate all figures (took ~4.8 h on the 2026-06 test run -
 #             the contrastive-learning net refits dominate on CPU)
-#   resume  — continue a previous tuning run that ran out of time
+#   resume  - continue a previous tuning run that ran out of time
 #
 # A full tune does not fit in one 6 h job on CPU runners. When the training
 # step hits its time limit, progress (Optuna trials + featurized data) is
@@ -40,7 +40,7 @@ on:
         options: [full, refresh, resume]
         default: full
       attempt:
-        description: "Chain counter (used by self-dispatched resume runs — leave at 1)"
+        description: "Chain counter (used by self-dispatched resume runs - leave at 1)"
         type: string
         default: "1"
 
@@ -99,21 +99,21 @@ jobs:
       - name: Pull the latest lab data from the live volume
         run: |
           # The data dir (experiment Excel, COSMO solvent profiles, sigma
-          # profile index) is gitignored — the live volume is the source of
+          # profile index) is gitignored - the live volume is the source of
           # truth. Grab the whole directory.
           mkdir -p checkpoints
           flyctl ssh console -a "$APP" -q -C "tar czf /tmp/labdata.tar.gz -C /data data"
           flyctl ssh sftp get -a "$APP" /tmp/labdata.tar.gz labdata.tar.gz
           flyctl ssh console -a "$APP" -q -C "rm /tmp/labdata.tar.gz"
           tar xzf labdata.tar.gz && rm labdata.tar.gz
-          # SMILES featurization cache — keyed by molecule only, safe to
+          # SMILES featurization cache - keyed by molecule only, safe to
           # reuse, saves a lot of mordred/COSMO time.
           flyctl ssh sftp get -a "$APP" \
             /data/checkpoints/smiles_cache.pkl checkpoints/smiles_cache.pkl || true
           # Mirror the NAMES of the live site's BO calibration plots (PNGs are
           # gitignored, so the checkout has none). The end-of-pipeline
           # calibration refresh regenerates every docs/bo_calibration_*.png it
-          # sees — empty placeholders are enough for it to know which
+          # sees - empty placeholders are enough for it to know which
           # acquisition×surrogate plots the site is showing.
           mkdir -p docs
           flyctl ssh console -a "$APP" -q -C "ls /data/docs" | tr -d '\r' \
@@ -173,7 +173,7 @@ jobs:
         run: |
           MODE="${{ github.event.inputs.mode || 'full' }}"
           if [ "$MODE" = "refresh" ]; then
-            echo "::error::Refresh run failed — nothing to resume (no tuning involved). Check the training log."
+            echo "::error::Refresh run failed - nothing to resume (no tuning involved). Check the training log."
             exit 1
           fi
           ATTEMPT="${{ github.event.inputs.attempt || '1' }}"
@@ -186,7 +186,7 @@ jobs:
               "https://api.github.com/repos/${{ github.repository }}/actions/workflows/quarterly-retrain.yml/dispatches" \
               -d "{\"ref\":\"main\",\"inputs\":{\"mode\":\"resume\",\"attempt\":\"$NEXT\"}}"
           else
-            echo "::error::Training still not finished after $ATTEMPT attempts — giving up. Investigate, then re-run manually in resume mode."
+            echo "::error::Training still not finished after $ATTEMPT attempts - giving up. Investigate, then re-run manually in resume mode."
             exit 1
           fi
 
@@ -221,7 +221,7 @@ jobs:
           # The pipeline re-runs surrogate calibration at the end of every
           # retrain and writes docs/bo_calibration_*.png. On the app, docs/
           # is a symlink to /data/docs (the volume), so putting the files
-          # there makes them live immediately AND persistent — no boot-time
+          # there makes them live immediately AND persistent - no boot-time
           # overlay needed (unlike the root-level artifacts above).
           find docs -maxdepth 1 -name 'bo_calibration_*.png' -newer .retrain_marker \
             | while read -r f; do

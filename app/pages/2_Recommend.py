@@ -37,7 +37,7 @@ page_header(
     caption="Get the next batch of synthesis conditions",
 )
 
-# ── Step 1: target chemistry ─────────────────────────────────────────────────
+# -- Step 1: target chemistry ---
 st.subheader("Target Chemistry")
 st.caption("Paste SMILES strings below. The 2D structures appear next to each "
            "field")
@@ -63,7 +63,7 @@ any_chemistry = not (linker_check.is_blank
 
 st.divider()
 
-# ── Step 2: batch size ───────────────────────────────────────────────────────
+# -- Step 2: batch size ---
 st.subheader("Number of Recommendations")
 batch_size = st.slider("Batch size", min_value=1, max_value=10,
                        value=int(BO_BATCH_SIZE), step=1,
@@ -72,7 +72,7 @@ batch_size = st.slider("Batch size", min_value=1, max_value=10,
 
 st.divider()
 
-# ── Step 3: advanced options ─────────────────────────────────────────────────
+# -- Step 3: advanced options ---
 with st.expander("Advanced Options", expanded=False):
     col_a, col_b = st.columns(2)
     with col_a:
@@ -120,7 +120,7 @@ with st.expander("Advanced Options", expanded=False):
 
 st.divider()
 
-# ── Action button ────────────────────────────────────────────────────────────
+# -- Action button ---
 disabled_reason = None
 if not chemistry_inputs_ok:
     disabled_reason = "Fix the SMILES errors above to continue."
@@ -133,7 +133,7 @@ go = st.button("Get recommendations", type="primary",
 if disabled_reason:
     st.caption(f":orange[{disabled_reason}]")
 
-# ── Background job state ─────────────────────────────────────────────────────
+# -- Background job state ---
 if "rec_status" not in st.session_state:
     st.session_state["rec_status"] = None
 if "rec_csv" not in st.session_state:
@@ -181,7 +181,7 @@ if status is not None:
             return 1
 
     # Wall-clock cap for the foreground polling loop. The background thread
-    # keeps running regardless — this just stops the Streamlit render from
+    # keeps running regardless - this just stops the Streamlit render from
     # blocking the server indefinitely. A Recommend run that has to re-
     # featurize the full Excel after a Record-result write can easily take
     # 20-40 min (ChemBERTa-2 reload + COSMO enrichment + assemble_features +
@@ -204,7 +204,7 @@ if status is not None:
             timed_out = True
             break
 
-    # Final render after the job ends — or after the polling cap fires.
+    # Final render after the job ends - or after the polling cap fires.
     # Critically, do NOT call this "Done" when the cap fired while the
     # background thread is still working; that's the trap that made the
     # page lie about success on long runs.
@@ -216,12 +216,12 @@ if status is not None:
         elapsed_box.caption(f"Elapsed: {status.elapsed_seconds:.0f} s")
         st.warning(
             "**This run is taking longer than the page's foreground polling "
-            "window (30 min)** — it is still going in the background. "
+            "window (30 min)** - it is still going in the background. "
             "Recommend re-featurizes the entire Excel when new experiments "
-            "have been recorded, which can take 20–40 min for "
+            "have been recorded, which can take 20-40 min for "
             "ChemBERTa-2 + COSMO enrichment + candidate-pool scoring. "
             "Click **Resume watching** to reconnect to the same job, or "
-            "leave this tab alone — the run will finish in the background "
+            "leave this tab alone - the run will finish in the background "
             "and the next time you load the page the latest CSV will "
             "appear under **Recommendations** below."
         )
@@ -253,11 +253,11 @@ if status is not None:
             "was interrupted. Check the run log above for stack traces."
         )
     # If the cap fired (timed_out and status.running is True), don't touch
-    # rec_csv — leave the previous batch visible if there is one, rather
+    # rec_csv - leave the previous batch visible if there is one, rather
     # than blanking the results section.
     _ = timed_out
 
-# ── Meta banners (similarity, calibration, layout) ──────────────────────────
+# -- Meta banners (similarity, calibration, layout) ---
 meta = st.session_state.get("rec_meta")
 if meta:
     st.divider()
@@ -267,7 +267,7 @@ if meta:
         _lvl = sim.get("level")
         if _lvl == "low":
             st.error(
-                f"**Extrapolation warning** — target chemistry has low "
+                f"**Extrapolation warning** - target chemistry has low "
                 f"similarity to training data (max cosine = {_ms:.3f}). "
                 f"The surrogate is extrapolating; these recommendations are "
                 f"informed guesses and should be treated as exploratory."
@@ -275,13 +275,13 @@ if meta:
         elif _lvl == "medium":
             st.warning(
                 f"Moderate similarity to training data "
-                f"(max cosine = {_ms:.3f}). Some extrapolation risk — expect "
+                f"(max cosine = {_ms:.3f}). Some extrapolation risk - expect "
                 f"wider error bars than the surrogate reports."
             )
         else:
             st.success(
                 f"Target chemistry is close to training data "
-                f"(max cosine = {_ms:.3f}) — surrogate predictions should be reliable."
+                f"(max cosine = {_ms:.3f}) - surrogate predictions should be reliable."
             )
     cal = meta.get("calibration")
     if cal:
@@ -290,7 +290,7 @@ if meta:
         if _q == "poor":
             st.error(
                 f"**Uncertainty poorly calibrated** (σ-scale = {_scale:.2f}). "
-                f"The uncertainty column in the table is not trustworthy — "
+                f"The uncertainty column in the table is not trustworthy - "
                 f"exploration vs. exploitation trade-off may be off. "
                 f"Consider retraining the surrogate on more data."
             )
@@ -304,7 +304,7 @@ if meta:
     if not layout.get("ok", True):
         st.warning(layout.get("warning") or "Feature layout may be stale.")
 
-# ── Results panel ────────────────────────────────────────────────────────────
+# -- Results panel ---
 csv_path = st.session_state.get("rec_csv")
 if csv_path:
     st.divider()
@@ -381,7 +381,7 @@ if csv_path:
                     msg += f" Discarded pick(s): {sorted(dropped_ranks)}."
                 st.success(msg)
 
-# ── SHAP explanation panel ──────────────────────────────────────────────────
+# -- SHAP explanation panel ---
 _shap_meta = (meta or {}).get("shap_batch") if meta else None
 if _shap_meta and _shap_meta.get("rows"):
     st.divider()
@@ -404,7 +404,7 @@ if _shap_meta and _shap_meta.get("rows"):
             _s2 = _desc.get("solvent_2", "")
             _label_bits.append(f"{_s1}" + (f"/{_s2}" if _s2 and _s2 != "NA" else ""))
         _summary = " · ".join(str(b) for b in _label_bits)
-        with st.expander(f"Rank {_rank} — {_summary}", expanded=(_rank == 1)):
+        with st.expander(f"Rank {_rank} - {_summary}", expanded=(_rank == 1)):
             _contribs = _row.get("contributions") or []
             if not _contribs:
                 st.caption("No attributions available.")
@@ -416,7 +416,7 @@ if _shap_meta and _shap_meta.get("rows"):
                     "SHAP":       c.get("shap_value", 0.0),
                     "Feature value": (f"{c['feature_value']:.3g}"
                                        if c.get("feature_value") is not None
-                                       else "—"),
+                                       else "-"),
                 })
             _df = pd.DataFrame(_rows)
             st.bar_chart(_df.set_index("Feature")["SHAP"])

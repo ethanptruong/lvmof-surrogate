@@ -29,14 +29,14 @@ echo App log:    %APP_LOG%
 echo Tunnel log: %TUN_LOG%
 echo.
 
-REM ── Start Streamlit in a new window (bound to localhost is enough; the tunnel reaches it locally) ──
+REM -- Start Streamlit in a new window (bound to localhost is enough; the tunnel reaches it locally) --
 start "COMPASS Streamlit" powershell -NoExit -NoProfile -Command ^
     "& { streamlit run app\streamlit_app.py --server.port 8501 --server.address 127.0.0.1 --browser.gatherUsageStats false *>&1 | Tee-Object -FilePath '%APP_LOG%' }"
 
-REM ── Give Streamlit a moment to bind the port before the tunnel attaches ──
+REM -- Give Streamlit a moment to bind the port before the tunnel attaches --
 powershell -NoProfile -Command "Start-Sleep -Seconds 4"
 
-REM ── Start the Cloudflare quick tunnel in a second window ──
+REM -- Start the Cloudflare quick tunnel in a second window --
 REM    Watch this window for a line like: https://xxxx.trycloudflare.com
 start "Cloudflare Tunnel" powershell -NoExit -NoProfile -Command ^
     "& { & 'C:\Program Files (x86)\cloudflared\cloudflared.exe' tunnel --url http://localhost:8501 *>&1 | Tee-Object -FilePath '%TUN_LOG%' }"

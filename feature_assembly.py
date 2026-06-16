@@ -1,5 +1,5 @@
 """
-feature_assembly.py — Functions to build and assemble the full feature matrix
+feature_assembly.py - Functions to build and assemble the full feature matrix
 for the LVMOF-Surrogate pipeline.
 """
 
@@ -910,10 +910,10 @@ def assemble_features(df_merged, df_inventory):
          linker_col, mod_col, process_cols_present, X_process,
          X_linker, X_modulator, mod_eq, X_precursor_perlig, Xinventorynumeric)
     """
-    # ── 1. Fingerprint features + col selection ────────────────────────────
+    # -- 1. Fingerprint features + col selection ---
     X_linker, X_modulator, mod_eq, linker_col, mod_col = build_fingerprint_features(df_merged)
 
-    # ── 2. Per-ligand fingerprint block setup ─────────────────────────────
+    # -- 2. Per-ligand fingerprint block setup ---
     inventory_cols = [c for c in df_merged.columns if c.startswith('Total_')]
     df_merged[inventory_cols] = df_merged[inventory_cols].fillna(0)
 
@@ -975,13 +975,13 @@ def assemble_features(df_merged, df_inventory):
     if bad.any():
         X_precursor_perlig[bad] = 0.0
 
-    # ── 3. Process variables ──────────────────────────────────────────────
+    # -- 3. Process variables ---
     from config import PROCESS_COLS
     process_cols = PROCESS_COLS
     process_cols_present = [c for c in process_cols if c in df_merged.columns]
     X_process = df_merged[process_cols_present].apply(pd.to_numeric, errors="coerce").fillna(0.0).to_numpy()
 
-    # ── 4. Initial X_features assembly ───────────────────────────────────
+    # -- 4. Initial X_features assembly ---
     X_features = np.concatenate(
         [X_linker, X_modulator, mod_eq,
          X_precursor_perlig,
@@ -990,11 +990,11 @@ def assemble_features(df_merged, df_inventory):
         axis=1
     )
 
-    # ── 5. Mordred RAC features ───────────────────────────────────────────
+    # -- 5. Mordred RAC features ---
     X_modulator_rac_aug, X_precursor_lig_rac_aug, X_precursor_perlig_rac = \
         build_mordred_rac_features(df_merged, fp_cols, num_descriptors, calc)
 
-    # ── 6. Initial X_final with metal block ───────────────────────────────
+    # -- 6. Initial X_final with metal block ---
     X_metal_block_aug, metal_names_aug = build_metal_features(df_merged)
 
     # Keep X_metal_block (just continuous + OHE, without aug extras) for older concat
@@ -1051,18 +1051,18 @@ def assemble_features(df_merged, df_inventory):
         X_metal_block
     ], axis=1)
 
-    # ── 7. Precursor full block ───────────────────────────────────────────
+    # -- 7. Precursor full block ---
     Xprecursor_full = build_precursor_full_block(df_merged)
     X_final = np.concatenate([X_final, Xprecursor_full], axis=1)
 
-    # ── 8. Per-ligand RAC ─────────────────────────────────────────────────
+    # -- 8. Per-ligand RAC ---
     X_final = np.concatenate([X_final, X_precursor_perlig_rac], axis=1)
 
-    # ── 9. Physicochemical features ───────────────────────────────────────
+    # -- 9. Physicochemical features ---
     X_linker_phys10, X_modulator_phys10 = build_physicochem_features(df_merged, linker_col, mod_col)
     X_final = np.concatenate([X_final, X_linker_phys10, X_modulator_phys10], axis=1)
 
-    # ── 10. TEP features ──────────────────────────────────────────────────
+    # -- 10. TEP features ---
     X_modulator_tep, X_linker_tep, X_precursor_perlig_tep = \
         build_tep_features(df_merged, linker_col, mod_col, fp_cols)
     X_final = np.concatenate(
@@ -1070,39 +1070,39 @@ def assemble_features(df_merged, df_inventory):
         axis=1
     )
 
-    # ── 11. Steric features ───────────────────────────────────────────────
+    # -- 11. Steric features ---
     df_merged, X_precursor_perlig_steric = build_steric_features(df_merged, fp_cols)
     X_final = np.concatenate([X_final, X_precursor_perlig_steric], axis=1)
 
-    # ── 12. ChemBERTa block ───────────────────────────────────────────────
+    # -- 12. ChemBERTa block ---
     X_chemberta_block, _ = build_chemberta_block(df_merged, linker_col, mod_col)
     X_final = np.concatenate([X_final, X_chemberta_block], axis=1)
 
-    # ── 13. G14 features ──────────────────────────────────────────────────
+    # -- 13. G14 features ---
     X_g14_block, _ = build_g14_features(df_merged, linker_col, mod_col)
     X_final = np.concatenate([X_final, X_g14_block], axis=1)
 
-    # ── 14. TTP features ──────────────────────────────────────────────────
+    # -- 14. TTP features ---
     Xlinker_ttp, _ = build_ttp_features(df_merged, linker_col)
     X_final = np.concatenate([X_final, Xlinker_ttp], axis=1)
 
-    # ── 15. Linker extra features ─────────────────────────────────────────
+    # -- 15. Linker extra features ---
     X_linker_extra = build_linker_extra_features(df_merged, linker_col)
     X_final = np.concatenate([X_final, X_linker_extra], axis=1)
 
-    # ── 16. Halide block ──────────────────────────────────────────────────
+    # -- 16. Halide block ---
     Xhalide_full = build_halide_block(df_merged, df_inventory)
     X_final = np.concatenate([X_final, Xhalide_full], axis=1)
 
-    # ── 17. DRFP block ────────────────────────────────────────────────────
+    # -- 17. DRFP block ---
     X_drfp, _ = build_drfp_block(df_merged)
     X_final = np.concatenate([X_final, X_drfp], axis=1)
 
-    # ── 18. SOAP block ────────────────────────────────────────────────────
+    # -- 18. SOAP block ---
     X_soap_precursor, X_soap_linker, _ = build_soap_block(df_merged, linker_col)
     X_final = np.concatenate([X_final, X_soap_precursor, X_soap_linker], axis=1)
 
-    # ── Final finiteness check ────────────────────────────────────────────
+    # -- Final finiteness check ---
     bad = ~np.isfinite(X_final)
     if bad.any():
         X_final[bad] = 0.0
@@ -1114,9 +1114,9 @@ def assemble_features(df_merged, df_inventory):
             X_linker, X_modulator, mod_eq, X_precursor_perlig, Xinventorynumeric)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # Feature name / group catalog for SHAP
-# ─────────────────────────────────────────────────────────────
+# ---
 
 _PHYSCHEM_NAMES = [
     'MolWt', 'MolLogP', 'TPSA', 'NumRotatableBonds',
@@ -1185,9 +1185,9 @@ def build_feature_catalog(
     chemistry features only and X_cv carries no cluster OHE columns).
 
     Returns
-    -------
-    names  : list[str]  — feature names for X_cv columns
-    groups : list[str]  — feature group labels for X_cv columns
+    ---
+    names  : list[str]  - feature names for X_cv columns
+    groups : list[str]  - feature group labels for X_cv columns
     """
     names = []
     groups = []
@@ -1198,7 +1198,7 @@ def build_feature_catalog(
 
     n_fp_lig = len(fp_cols)
 
-    # ── X_features block (concat step 4 in assemble_features) ──
+    # -- X_features block (concat step 4 in assemble_features) --
     # 1. Linker Morgan FP
     _push([f'linker_fp_{i:04d}' for i in range(X_linker.shape[1])],
           "Linker Morgan FP")
@@ -1219,16 +1219,16 @@ def build_feature_catalog(
     _push([f'proc_raw:{c}' for c in process_cols_present],
           "Process Variables (raw)")
 
-    # ── Mordred RAC block ──
+    # -- Mordred RAC block --
     _push([f'mod_rac_{i}' for i in range(num_descriptors)]
           + ['mod_rac_any_bad', 'mod_rac_frac_bad'],
           "Modulator RAC")
 
-    # ── Metal block (continuous descriptors + OHE) ──
+    # -- Metal block (continuous descriptors + OHE) --
     _push(_METAL_DESC_NAMES, "Metal Center (mendeleev)")
     _push(list(ohe_cols), "Metal Center (mendeleev)")
 
-    # ── Precursor full block (metal center + coligand + complex) ──
+    # -- Precursor full block (metal center + coligand + complex) --
     _push([f'prec_metal_center_{i}' for i in range(METAL_BLOCK_DIM)],
           "Metal Precursor Complex")
     _push([f'prec_coligand_{i}' for i in range(COLIGAND_BLOCK_DIM)],
@@ -1236,7 +1236,7 @@ def build_feature_catalog(
     _push([f'prec_complex_{i}' for i in range(COMPLEX_BLOCK_DIM)],
           "Metal Precursor Complex")
 
-    # ── Per-ligand RAC ──
+    # -- Per-ligand RAC --
     D = num_descriptors
     for j, col in enumerate(fp_cols):
         token = col.replace('Total_', '')
@@ -1245,11 +1245,11 @@ def build_feature_catalog(
                  f'perlig_{token}_rac_count'],
               "Precursor Ligand RAC")
 
-    # ── Physicochem ──
+    # -- Physicochem --
     _push([f'linker_{n}' for n in _PHYSCHEM_NAMES], "Linker Physchem/FP")
     _push([f'mod_{n}' for n in _PHYSCHEM_NAMES], "Mod Physchem/FP")
 
-    # ── TEP ──
+    # -- TEP --
     _push(['mod_tep_val', 'mod_tep_missing'], "Ligand TEP (Electronic)")
     _push(['linker_tep_val', 'linker_tep_missing'], "Ligand TEP (Electronic)")
     for j, col in enumerate(fp_cols):
@@ -1258,14 +1258,14 @@ def build_feature_catalog(
                f'perlig_{token}_tep_count'],
               "Ligand TEP (Electronic)")
 
-    # ── Steric ──
+    # -- Steric --
     for j, col in enumerate(fp_cols):
         token = col.replace('Total_', '')
         _push([f'perlig_{token}_cone_angle', f'perlig_{token}_buried_vol',
                f'perlig_{token}_steric_miss', f'perlig_{token}_steric_count'],
               "Ligand Sterics")
 
-    # ── ChemBERTa block ──
+    # -- ChemBERTa block --
     # chemberta_names already has per-role names from build_chemberta_block()
     # Split into groups: linker bert / linker physchem-fp / mod bert / mod physchem-fp
     per_mol = len(chemberta_names) // 2
@@ -1276,7 +1276,7 @@ def build_feature_catalog(
         names.append(n)
         groups.append("Mod ChemBERT" if i < BERT_DIM else "Mod Physchem/FP")
 
-    # ── G14 ──
+    # -- G14 --
     n_hub = len(G14_HUB_NAMES)
     n_smarts = len(ALL_G14_SMARTS_NAMES)
     for i, n in enumerate(g14_names):
@@ -1284,30 +1284,30 @@ def build_feature_catalog(
         # First 2*n_hub are hub features, rest are SMARTS
         groups.append("G14 Hub Topology" if i < 2 * n_hub else "G14 Hub SMARTS")
 
-    # ── TTP ──
+    # -- TTP --
     _push(list(TTP_FEATURE_NAMES), "Linker TTP")
 
-    # ── Linker extra (EState 79, Topo 14, Torsion 1024, AtomPair 2048) ──
+    # -- Linker extra (EState 79, Topo 14, Torsion 1024, AtomPair 2048) --
     _push([f'linker_estate_{i}' for i in range(79)], "Linker EState")
     _push([f'linker_{n}' for n in _TOPO_NAMES], "Linker Topological")
     _push([f'linker_torsion_{i:04d}' for i in range(1024)], "Linker Torsion FP")
     _push([f'linker_atompair_{i:04d}' for i in range(2048)], "Linker Atom-Pair FP")
 
-    # ── Halide ──
+    # -- Halide --
     _push(list(HALIDE_FEAT_COLS), "Halide Features")
 
-    # ── DRFP ──
+    # -- DRFP --
     _push([f'drfp_{i}' for i in range(2048)], "Reaction FP (DRFP)")
 
-    # ── SOAP ──
+    # -- SOAP --
     n_soap_prec = X_soap_precursor.shape[1]
     n_soap_link = X_soap_linker.shape[1]
     _push([f'soap_precursor_{i}' for i in range(n_soap_prec)], "3D SOAP (Precursor)")
     _push([f'soap_linker_{i}' for i in range(n_soap_link)], "3D SOAP (Linker)")
 
-    # ── KMeans cluster OHE (only if pre-pended to VT input by
+    # -- KMeans cluster OHE (only if pre-pended to VT input by
     #    apply_variance_threshold; the leakage-free path adds them
-    #    fold-locally inside the pipeline so they are NOT in vt_mask). ──
+    #    fold-locally inside the pipeline so they are NOT in vt_mask). --
     if kmeans_prepended_to_vt:
         _push([f'kmeans_cluster_{i}' for i in range(n_clusters)],
               "KMeans Cluster OHE")
@@ -1319,13 +1319,13 @@ def build_feature_catalog(
               f"VT input has {n_vt_input} columns. "
               f"Delta = {len(names) - n_vt_input}")
 
-    # ── Apply VT mask ──
+    # -- Apply VT mask --
     names_arr = np.array(names, dtype=object)
     groups_arr = np.array(groups, dtype=object)
     vt_names = list(names_arr[vt_mask])
     vt_groups = list(groups_arr[vt_mask])
 
-    # ── Append process (normalized) + interactions ──
+    # -- Append process (normalized) + interactions --
     vt_names += [f'proc:{c}' for c in process_cols_present]
     vt_groups += ['Process Variables'] * len(process_cols_present)
 
@@ -1365,8 +1365,8 @@ def build_discrete_mask(
     build_feature_catalog (see that function's docstring).
 
     Returns
-    -------
-    discrete : np.ndarray[bool]  — length matches X_cv columns
+    ---
+    discrete : np.ndarray[bool]  - length matches X_cv columns
     """
     mask_parts: list[np.ndarray] = []
 
@@ -1380,53 +1380,53 @@ def build_discrete_mask(
 
     n_fp_lig = len(fp_cols)
 
-    # ── X_features block ──
-    # 1. Linker Morgan FP — binary
+    # -- X_features block --
+    # 1. Linker Morgan FP - binary
     _d(X_linker.shape[1])
-    # 2. Modulator Morgan FP — binary
+    # 2. Modulator Morgan FP - binary
     _d(X_modulator.shape[1])
-    # 3. Modulator equivalents — continuous
+    # 3. Modulator equivalents - continuous
     _c(mod_eq.shape[1])
     # 4. Per-ligand precursor: 2048 binary FP + 1 continuous count each
     for _ in range(n_fp_lig):
         _d(2048)   # fingerprint bits
         _c(1)      # count
-    # 5. Inventory numeric — continuous
+    # 5. Inventory numeric - continuous
     _c(Xinventorynumeric.shape[1])
-    # 6. Process variables (raw) — continuous
+    # 6. Process variables (raw) - continuous
     _c(len(process_cols_present))
 
-    # ── Mordred RAC block — continuous descriptors + 2 QA cols ──
+    # -- Mordred RAC block - continuous descriptors + 2 QA cols --
     _c(num_descriptors + 2)
 
-    # ── Metal block: continuous descriptors + OHE (discrete) ──
+    # -- Metal block: continuous descriptors + OHE (discrete) --
     n_metal_desc = len(_METAL_DESC_NAMES)
     n_metal_ohe = len(ohe_cols)
     _c(n_metal_desc)   # mendeleev descriptors
     _d(n_metal_ohe)    # metal OHE
 
-    # ── Precursor full block (metal center + coligand + complex) — continuous ──
+    # -- Precursor full block (metal center + coligand + complex) - continuous --
     _c(METAL_BLOCK_DIM + COLIGAND_BLOCK_DIM + COMPLEX_BLOCK_DIM)
 
-    # ── Per-ligand RAC — continuous (descriptors + QA + count) ──
+    # -- Per-ligand RAC - continuous (descriptors + QA + count) --
     for _ in range(n_fp_lig):
         _c(num_descriptors + 3)
 
-    # ── Physicochemical — continuous ──
+    # -- Physicochemical - continuous --
     _c(X_linker_phys10.shape[1])
     _c(X_modulator_phys10.shape[1])
 
-    # ── TEP — continuous ──
+    # -- TEP - continuous --
     _c(X_modulator_tep.shape[1])
     _c(X_linker_tep.shape[1])
     for _ in range(n_fp_lig):
         _c(3)   # tep_val, miss_flag, count
 
-    # ── Steric — continuous ──
+    # -- Steric - continuous --
     for _ in range(n_fp_lig):
         _c(4)   # cone_angle, buried_vol, miss, count
 
-    # ── ChemBERTa block (linker + modulator) ──
+    # -- ChemBERTa block (linker + modulator) --
     # Per molecule: BERT_DIM(cont) + ExtRDKit(cont) + Shape3D(cont)
     #   + VSA(cont) + Composition(cont) + MACCS(discrete) + Fragments(discrete)
     from config import BERT_DIM
@@ -1436,10 +1436,10 @@ def build_discrete_mask(
         _c(_per_mol_cont)
         _d(_per_mol_disc)
 
-    # ── G14 block ──
-    # Hub topology features — mostly continuous (counts, fractions, etc.)
+    # -- G14 block --
+    # Hub topology features - mostly continuous (counts, fractions, etc.)
     # but binary flags (g14hub_present, isSi/Ge/Sn/Pb, missing) are discrete.
-    # SMARTS pattern counts — discrete (integer match counts, mostly 0/1).
+    # SMARTS pattern counts - discrete (integer match counts, mostly 0/1).
     # For simplicity: hub = continuous, SMARTS = discrete
     n_hub = len(G14_HUB_NAMES)
     n_smarts = len(ALL_G14_SMARTS_NAMES)
@@ -1448,27 +1448,27 @@ def build_discrete_mask(
     _d(n_smarts)   # linker SMARTS
     _d(n_smarts)   # modulator SMARTS
 
-    # ── TTP — continuous ──
+    # -- TTP - continuous --
     _c(len(TTP_FEATURE_NAMES))
 
-    # ── Linker extra: EState(79, discrete) + Topo(14, cont)
-    #    + Torsion(1024, discrete) + AtomPair(2048, discrete) ──
+    # -- Linker extra: EState(79, discrete) + Topo(14, cont)
+    #    + Torsion(1024, discrete) + AtomPair(2048, discrete) --
     _d(79)     # EState FP
     _c(14)     # topological descriptors
     _d(1024)   # torsion FP
     _d(2048)   # atom-pair FP
 
-    # ── Halide — continuous (counts & type encoding) ──
+    # -- Halide - continuous (counts & type encoding) --
     _c(len(HALIDE_FEAT_COLS))
 
-    # ── DRFP — discrete (binary fingerprint) ──
+    # -- DRFP - discrete (binary fingerprint) --
     _d(2048)
 
-    # ── SOAP — continuous ──
+    # -- SOAP - continuous --
     _c(X_soap_precursor.shape[1])
     _c(X_soap_linker.shape[1])
 
-    # ── KMeans cluster OHE — discrete (only if pre-pended to VT input) ──
+    # -- KMeans cluster OHE - discrete (only if pre-pended to VT input) --
     if kmeans_prepended_to_vt:
         _d(n_clusters)
 
@@ -1481,9 +1481,9 @@ def build_discrete_mask(
     # Full X_cv mask: VT features + process (continuous) + interactions
     cv_discrete = np.concatenate([
         vt_only_discrete,
-        # Process (normalized) — continuous
+        # Process (normalized) - continuous
         np.zeros(len(process_cols_present), dtype=bool),
-        # Interactions — 5 continuous + 1 discrete (high-temp flag)
+        # Interactions - 5 continuous + 1 discrete (high-temp flag)
         np.array([False, False, False, False, False, True], dtype=bool),
     ])
 

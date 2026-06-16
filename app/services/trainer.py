@@ -24,7 +24,7 @@ def _persist_artifacts() -> None:
     anything regenerated there vanishes on restart/redeploy. The entrypoint
     overlays ``$COMPASS_DATA_DIR/artifacts`` back onto the root at boot, so
     copying there makes fresh plots survive. Locally (no volume) this is a
-    no-op — the project root is already persistent.
+    no-op - the project root is already persistent.
     """
     vol = os.environ.get("COMPASS_DATA_DIR", "")
     if not vol or not os.path.isdir(vol):
@@ -47,7 +47,7 @@ def start_retune(
     """Launch ``main.main(...)`` in the background.
 
     Parameters
-    ----------
+    ---
     skip_tuning : if True, only re-run evaluation against the existing
                   ``best_params.pkl``.  Use this to refresh plots after a
                   small data change without paying the multi-hour Optuna cost.
@@ -73,7 +73,7 @@ def start_update(*, data_path: Optional[str] = None) -> RunStatus:
     Drops the feature/data caches so ``main.main`` re-featurizes from the
     current Excel, then re-fits with the existing tuned hyperparameters and
     regenerates all plots. This is the action chemists should use after
-    recording new experiments — running "retrain" alone would silently reuse
+    recording new experiments - running "retrain" alone would silently reuse
     the stale cached features and never see the new rows.
     """
     status = RunStatus()

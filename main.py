@@ -1,6 +1,6 @@
 """
 LVMOF-Surrogate: MOF Synthesis Prediction Pipeline
-Entry point — orchestrates data loading, featurization, dimensionality reduction,
+Entry point - orchestrates data loading, featurization, dimensionality reduction,
 model training, evaluation, and Bayesian Optimization.
 
 Usage:
@@ -61,7 +61,7 @@ from evaluation import (plot_roc_prc, plot_learning_curves,
 import random
 import torch
 
-# ── Global reproducibility seed ───────────────────────────────────────────────
+# -- Global reproducibility seed ---
 SEED = RANDOM_STATE
 random.seed(SEED)
 np.random.seed(SEED)
@@ -74,7 +74,7 @@ if torch.cuda.is_available():
 print("CUDA available :", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("GPU            :", torch.cuda.get_device_name(0))
-# ──────────────────────────────────────────────────────────────────────────────
+# ---
 
 CHECKPOINT_DIR = "checkpoints"
 DATA_CKPT      = os.path.join(CHECKPOINT_DIR, "data.pkl")
@@ -255,8 +255,8 @@ def _featurize_data(data_path=None):
     X_cv = assemble_cv_matrix(X_vt, Xprocnorm, interactions)
     groups, best_k, cv_tune, cv_eval = select_kmeans_groups(X_2d, y)
 
-    # ── Build feature name catalog (mirrors run_shap.py) ──────────────────────
-    print("── Building feature name catalog ──")
+    # -- Build feature name catalog (mirrors run_shap.py) ---
+    print("-- Building feature name catalog --")
     X_modulator_rac_aug, _, X_precursor_perlig_rac = \
         build_mordred_rac_features(df_merged, fp_cols, num_descriptors, calc)
 
@@ -343,7 +343,7 @@ def _featurize_data(data_path=None):
         kmeans_prepended_to_vt=False,
     )
 
-    # ── Build discrete/continuous feature mask (Fix 1) ─────────────────────
+    # -- Build discrete/continuous feature mask (Fix 1) ---
     discrete_mask, vt_discrete_mask = build_discrete_mask(
         X_linker=X_linker,
         X_modulator=X_modulator,
@@ -412,7 +412,7 @@ def main(data_path=None, skip_tuning=False):
 
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    # ── Steps 1–4: data + features + CV setup ─────────────────────────────────
+    # -- Steps 1-4: data + features + CV setup ---
 
     ck = _load(DATA_CKPT)
     if (ck is not None and "discrete_mask" in ck
@@ -425,10 +425,10 @@ def main(data_path=None, skip_tuning=False):
         n_chem_features  = ck["n_chem_features"]
     else:
         if ck is not None:
-            print("\n── Checkpoint outdated (missing n_chem_features / discrete mask), "
-                  "re-featurizing ──")
+            print("\n-- Checkpoint outdated (missing n_chem_features / discrete mask), "
+                  "re-featurizing --")
         else:
-            print("\n── Featurizing from data file ──")
+            print("\n-- Featurizing from data file --")
         (X_cv, y, groups, cv_tune, cv_eval, X_names, X_groups,
          discrete_mask, vt_discrete_mask,
          n_chem_features) = _featurize_data(data_path)
@@ -444,19 +444,19 @@ def main(data_path=None, skip_tuning=False):
         print(f"[checkpoint] saved {DATA_CKPT} (layout={layout_hash}, "
               f"chem={n_chem_features})")
 
-    # ── Wire discrete mask into models (Fix 1) ───────────────────────────────
+    # -- Wire discrete mask into models (Fix 1) ---
     import models as _models_mod
     _models_mod.ORIGINAL_DISCRETE_MASK = discrete_mask
     print(f"[discrete mask] set ORIGINAL_DISCRETE_MASK: "
           f"{int(discrete_mask.sum())} discrete / "
           f"{len(discrete_mask) - int(discrete_mask.sum())} continuous")
 
-    # ── MI cliff plot (always regenerated from cached mask — fast) ───────────
-    print("── MI cliff diagnostic (discrete vs continuous) ──")
+    # -- MI cliff plot (always regenerated from cached mask - fast) ---
+    print("-- MI cliff diagnostic (discrete vs continuous) --")
     mi_cliff_scores = run_mi_diagnostic(X_cv, y, discrete_mask=discrete_mask)
     plot_mi_cliff(mi_cliff_scores, discrete_mask=discrete_mask)
 
-    # ── Steps 5–6: Optuna tuning (one study per pipeline variant) ─────────────
+    # -- Steps 5-6: Optuna tuning (one study per pipeline variant) ---
     _REQUIRED_KEYS = {
         "best_xgb_mi_params", "best_rf_mi_params",
         "best_xgb_cl_mi_params", "best_rf_cl_mi_params",
@@ -471,7 +471,7 @@ def main(data_path=None, skip_tuning=False):
         best_xgb_cl_only_params = ck_params["best_xgb_cl_only_params"]
         best_rf_cl_only_params  = ck_params["best_rf_cl_only_params"]
         if skip_tuning:
-            print("\n── Using existing hyperparameters (--skip-tuning) ──")
+            print("\n-- Using existing hyperparameters (--skip-tuning) --")
             print("   NOTE: If you changed MI_K, CL_EMB_DIM, or discrete mask, "
                   "consider re-tuning (run without --skip-tuning) and deleting "
                   "checkpoints/best_params.pkl + checkpoints/optuna.db")
@@ -502,17 +502,17 @@ def main(data_path=None, skip_tuning=False):
                     n_trials=remaining, callbacks=[progress_callback])
             return study
 
-        print("\n── Tuning XGB | MI only ──────────────────────────────────────────────────")
+        print("\n-- Tuning XGB | MI only ---")
         study_xgb_mi      = _run_study("xgb_mi_study",      objective_xgb,         n_trials=100)
-        print("\n── Tuning RF  | MI only ──────────────────────────────────────────────────")
+        print("\n-- Tuning RF  | MI only ---")
         study_rf_mi       = _run_study("rf_mi_study",        objective_rf,          n_trials=100)
-        print("\n── Tuning XGB | CL + MI ──────────────────────────────────────────────────")
+        print("\n-- Tuning XGB | CL + MI ---")
         study_xgb_cl_mi   = _run_study("xgb_cl_mi_study",   objective_xgb_cl_mi,   n_trials=100)
-        print("\n── Tuning RF  | CL + MI ──────────────────────────────────────────────────")
+        print("\n-- Tuning RF  | CL + MI ---")
         study_rf_cl_mi    = _run_study("rf_cl_mi_study",     objective_rf_cl_mi,    n_trials=100)
-        print("\n── Tuning XGB | CL only ──────────────────────────────────────────────────")
+        print("\n-- Tuning XGB | CL only ---")
         study_xgb_cl_only = _run_study("xgb_cl_only_study",  objective_xgb_cl_only, n_trials=100)
-        print("\n── Tuning RF  | CL only ──────────────────────────────────────────────────")
+        print("\n-- Tuning RF  | CL only ---")
         study_rf_cl_only  = _run_study("rf_cl_only_study",   objective_rf_cl_only,  n_trials=100)
 
         best_xgb_mi_params      = {k: v for k, v in study_xgb_mi.best_params.items()
@@ -558,7 +558,7 @@ def main(data_path=None, skip_tuning=False):
     ]
 
     # 8. Evaluate
-    print("\n─── FINAL COMPARISON ──────────────────────────────────")
+    print("\n--- FINAL COMPARISON ---")
     for name, pipe, n_jobs in pipelines:
         eval_pipe(name, pipe, X_cv, y, cv_eval, groups, scoring_ordinal, n_jobs=n_jobs)
 
@@ -579,7 +579,7 @@ def main(data_path=None, skip_tuning=False):
         ("RF  | CL + MI",           pipe_rf_cl_mi),
         ("RF  | CL only (triplet)", pipe_rf_cl_only),
     ]
-    print("\n─── Pre-fitting pipelines for SHAP (full dataset) ──────────────────")
+    print("\n--- Pre-fitting pipelines for SHAP (full dataset) ---")
     _fitted_for_shap = {}
     for _lbl, _pipe in _shap_targets:
         print(f"  Fitting: {_lbl}")
@@ -591,25 +591,25 @@ def main(data_path=None, skip_tuning=False):
         run_shap_featurized(_shap_label, _shap_pipe, X_cv, y, X_names, X_groups,
                             top_n=15, fitted_pipe=_fitted_for_shap[_shap_label])
 
-    # ── BO calibration refresh ────────────────────────────────────────────────
+    # -- BO calibration refresh ---
     # Every retrain (quarterly workflow, in-app Retrain / Update model)
     # regenerates the docs/bo_calibration_*.png plots, so Model Confidence
     # shows calibration of the model that is actually live rather than
     # whatever the last manual BO simulate produced. Non-fatal by design: a
     # calibration hiccup must not fail an otherwise-successful retrain (the
     # quarterly workflow would chain pointless resume runs).
-    print("\n─── Refreshing BO calibration plots ────────────────────────────────")
+    print("\n--- Refreshing BO calibration plots ---")
     try:
         refresh_calibration_plots(data_path)
     except Exception as exc:
-        print(f"[calibration] WARNING: calibration refresh failed — {exc}")
+        print(f"[calibration] WARNING: calibration refresh failed - {exc}")
 
-# ── Bayesian Optimization ────────────────────────────────────────────────────
+# -- Bayesian Optimization ---
 
 def _load_bo_data(data_path=None):
     """Load featurized data for BO simulate/batch modes.
 
-    Always reflects the current data file — new experiments are picked up
+    Always reflects the current data file - new experiments are picked up
     automatically.  Results are cached in checkpoints/features.pkl and only
     recomputed when the data file changes.
     """
@@ -620,7 +620,7 @@ def _load_bo_data(data_path=None):
 def _load_n_chem_features():
     """Read n_chem_features from the features cache for fold-local KMeans.
 
-    Returns None if the cache predates the v2 schema — callers should treat
+    Returns None if the cache predates the v2 schema - callers should treat
     None as "legacy / no in-pipeline KMeans" (i.e. expect X_cv to carry
     pre-fit cluster-OHE columns). After re-featurization the cache always
     contains n_chem_features, so this should only be None on stale caches.
@@ -632,7 +632,7 @@ def _load_n_chem_features():
 
 
 def _data_file_fingerprint(data_path):
-    """Return (mtime, size) for the data file — used to detect changes."""
+    """Return (mtime, size) for the data file - used to detect changes."""
     try:
         st = os.stat(data_path)
         return (st.st_mtime, st.st_size)
@@ -671,7 +671,7 @@ def _featurize_fresh(data_path=None):
             and fingerprint is not None
             and cached.get("fingerprint") == fingerprint
             and cached.get("schema") == CACHE_SCHEMA):
-        print(f"[features] Cache hit — data file unchanged, skipping featurization.")
+        print(f"[features] Cache hit - data file unchanged, skipping featurization.")
         return (cached["X_cv"], cached["y_raw"], cached["y_remapped"],
                 cached["df_merged"], cached["mask"], cached["process_cols_present"])
     if cached is not None and cached.get("schema") != CACHE_SCHEMA:
@@ -714,7 +714,7 @@ def _featurize_fresh(data_path=None):
     # Save featurization cache. Extras (df_inventory, fitted_vt, n_raw_features,
     # n_chem_features) enable BO recommend-mode to re-featurize a novel target
     # chemistry and project it into the same X_cv feature space used at
-    # training time. fitted_vt now contains only {"vt": ...} — no KMeans/OHE.
+    # training time. fitted_vt now contains only {"vt": ...} - no KMeans/OHE.
     joblib.dump({
         "fingerprint": fingerprint,
         "schema": CACHE_SCHEMA,
@@ -818,7 +818,7 @@ def _print_calibration_report(cal):
     print(f"  Mean calibration error: {cal['calibration_error']:.4f}  "
           f"(0 = perfect)")
     if cal["calibration_error"] > 0.10:
-        print("  NOTE: calibration error > 0.10 — sigma estimates are "
+        print("  NOTE: calibration error > 0.10 - sigma estimates are "
               "unreliable. EI acquisition scores may be misleading.")
 
 
@@ -828,7 +828,7 @@ def _compute_calibration(surrogate_name, X_cv, y_raw, groups, ck_params,
     calibration on the held-out pool.
 
     This is exactly the calibration check simulate mode runs after a
-    simulation, minus the (much slower) BO query loop — the split, refit and
+    simulation, minus the (much slower) BO query loop - the split, refit and
     metrics are identical, so the resulting plot matches what a fresh
     simulate run would produce.
     """
@@ -884,7 +884,7 @@ def refresh_calibration_plots(data_path=None):
     groups, _ = compute_chemistry_groups(df_merged)
     ck_params = _load(PARAMS_CKPT) or {}
 
-    # One fit per unique surrogate — calibration does not depend on the
+    # One fit per unique surrogate - calibration does not depend on the
     # acquisition function, so every acquisition-labelled plot of the same
     # surrogate reuses one result.
     by_surrogate = {}
@@ -892,7 +892,7 @@ def refresh_calibration_plots(data_path=None):
         by_surrogate.setdefault(surr, []).append(path)
 
     for surr in sorted(by_surrogate):
-        print(f"\n── Surrogate Calibration ({surr}) ──")
+        print(f"\n-- Surrogate Calibration ({surr}) --")
         cal = _compute_calibration(surr, X_cv, y_raw, groups, ck_params)
         _print_calibration_report(cal)
         for path in by_surrogate[surr]:
@@ -941,8 +941,8 @@ def run_bo(args):
     groups, group_names = compute_chemistry_groups(df_merged)
 
     if args.bo_mode == "simulate":
-        print(f"\n── Simulation: {args.bo_acquisition} | {args.bo_surrogate} "
-              f"| {args.bo_iterations} iters ──")
+        print(f"\n-- Simulation: {args.bo_acquisition} | {args.bo_surrogate} "
+              f"| {args.bo_iterations} iters --")
         history = bo.run_simulation(X_cv, y_raw, init_fraction=BO_INIT_FRACTION,
                                     groups=groups)
         metrics = SimulationMetrics(y_raw)
@@ -955,7 +955,7 @@ def run_bo(args):
 
         af_s = "n/a (no hits in pool)" if np.isnan(summary["AF"]) else f"{summary['AF']:.2f}"
         ef_s = "n/a (no hits in pool)" if np.isnan(summary["EF"]) else f"{summary['EF']:.2f}"
-        print(f"\n── Results (hit threshold = score >= {BO_HIT_THRESHOLD:.0f}) ──")
+        print(f"\n-- Results (hit threshold = score >= {BO_HIT_THRESHOLD:.0f}) --")
         print(f"  AF:           {af_s}")
         print(f"  EF:           {ef_s}")
         print(f"  Hit rate:     {hit_rate*100:.1f}%  (baseline: {baseline_hit*100:.1f}%)")
@@ -972,11 +972,11 @@ def run_bo(args):
         plot_simple_regret([history], [label], y_raw,
                            save_path=f"docs/bo_simple_regret_{label}.png")
 
-        # ── Surrogate calibration check ──────────────────────────────────────
+        # -- Surrogate calibration check ---
         # Refit surrogate on the initial training split, then evaluate calibration
         # on the held-out pool.  This is a clean snapshot of how well sigma
         # estimates the actual prediction error before any BO queries are made.
-        print(f"\n── Surrogate Calibration ({args.bo_surrogate}) ──")
+        print(f"\n-- Surrogate Calibration ({args.bo_surrogate}) --")
         init_idx = np.array(history["init_indices"])
         pool_idx = np.array(history["pool_indices"])
         surrogate.fit(X_cv[init_idx], y_raw[init_idx])
@@ -986,11 +986,11 @@ def run_bo(args):
                          save_path=f"docs/bo_calibration_{label}.png")
 
     elif args.bo_mode == "calibrate":
-        # Calibration only — same init/pool split and sigma check as simulate
+        # Calibration only - same init/pool split and sigma check as simulate
         # mode, minus the BO query loop. This is what the training pipeline
         # runs automatically after every retrain (see refresh_calibration_plots).
         label = f"{args.bo_acquisition}_{args.bo_surrogate}"
-        print(f"\n── Surrogate Calibration ({args.bo_surrogate}) ──")
+        print(f"\n-- Surrogate Calibration ({args.bo_surrogate}) --")
         cal = _compute_calibration(args.bo_surrogate, X_cv, y_raw, groups,
                                    ck_params,
                                    ranking_target=args.bo_ranking_target)
@@ -999,8 +999,8 @@ def run_bo(args):
                          save_path=f"docs/bo_calibration_{label}.png")
 
     elif args.bo_mode == "batch":
-        print(f"\n── Batch simulation: {args.bo_acquisition} | {args.bo_surrogate} "
-              f"| batch_size={args.bo_batch_size} | {args.bo_batch_strategy} ──")
+        print(f"\n-- Batch simulation: {args.bo_acquisition} | {args.bo_surrogate} "
+              f"| batch_size={args.bo_batch_size} | {args.bo_batch_strategy} --")
         history = bo.run_batch(X_cv, y_raw, init_fraction=BO_INIT_FRACTION, groups=groups)
         metrics = SimulationMetrics(y_raw)
         summary = metrics.summary(history)
@@ -1011,7 +1011,7 @@ def run_bo(args):
 
         af_s = "n/a (no hits in pool)" if np.isnan(summary["AF"]) else f"{summary['AF']:.2f}"
         ef_s = "n/a (no hits in pool)" if np.isnan(summary["EF"]) else f"{summary['EF']:.2f}"
-        print(f"\n── Results (hit threshold = score >= {BO_HIT_THRESHOLD:.0f}) ──")
+        print(f"\n-- Results (hit threshold = score >= {BO_HIT_THRESHOLD:.0f}) --")
         print(f"  AF:          {af_s}")
         print(f"  EF:          {ef_s}")
         print(f"  Hit rate:    {hit_rate*100:.1f}%  (baseline: {baseline_hit*100:.1f}%)")
@@ -1081,7 +1081,7 @@ def _run_evaluate(args):
     first_surrogate = None   # for calibration (first seed only)
 
     for i_seed, seed in enumerate(seeds):
-        print(f"\n── Seed {seed} ──")
+        print(f"\n-- Seed {seed} --")
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
                                        ranking_target=args.bo_ranking_target)
 
@@ -1113,7 +1113,7 @@ def _run_evaluate(args):
         print(f"  AF={af_s}  EF={ef_s}  "
               f"Hit={hit*100:.1f}% (base={baseline*100:.1f}%)")
 
-    # ── Aggregate results ──────────────────────────────────────────────────
+    # -- Aggregate results ---
     print("\n" + "=" * 70)
     print(f"  EVALUATION SUMMARY (mean ± std across seeds)  "
           f"hit threshold = score >= {BO_HIT_THRESHOLD:.0f}")
@@ -1159,12 +1159,12 @@ def _run_evaluate(args):
           f"{_fmt(agg_hits, scale=100, prec=1)}%  "
           f"{np.mean(agg_base)*100:>6.1f}%")
 
-    # ── Per-cluster bar charts ───────────────────────────────────────────
+    # -- Per-cluster bar charts ---
     for metric in ["AF", "EF"]:
         plot_per_cluster_bar(all_cluster_stats, metric=metric)
     plot_evaluate_hit_rate(all_cluster_stats)
 
-    # ── Convergence & diagnostic plots (all seeds overlaid) ───────────
+    # -- Convergence & diagnostic plots (all seeds overlaid) ---
     label = f"{args.bo_acquisition}_{args.bo_surrogate}"
     seed_labels = [f"seed_{s}" for s in seeds]
     plot_convergence(all_histories, seed_labels, y_raw,
@@ -1177,8 +1177,8 @@ def _run_evaluate(args):
                        save_path=f"docs/bo_simple_regret_{label}.png")
     save_full_history(all_histories[0], label)
 
-    # ── Surrogate calibration (first seed's init/pool split) ──────────
-    print(f"\n── Surrogate Calibration ({args.bo_surrogate}) ──")
+    # -- Surrogate calibration (first seed's init/pool split) ---
+    print(f"\n-- Surrogate Calibration ({args.bo_surrogate}) --")
     init_idx = np.array(all_histories[0]["init_indices"])
     pool_idx = np.array(all_histories[0]["pool_indices"])
     first_surrogate.fit(X_cv[init_idx], y_raw[init_idx])
@@ -1216,10 +1216,10 @@ def _run_loco(args):
     for cid in range(n_clusters):
         pool_idx = np.where(groups == cid)[0]
         if len(pool_idx) < MIN_POOL_LOCO:
-            print(f"\n── Held-out cluster {cid} ── SKIPPED (pool={len(pool_idx)} < {MIN_POOL_LOCO})")
+            print(f"\n-- Held-out cluster {cid} -- SKIPPED (pool={len(pool_idx)} < {MIN_POOL_LOCO})")
             continue
 
-        print(f"\n── Held-out cluster {cid} ──")
+        print(f"\n-- Held-out cluster {cid} --")
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params,
                                        ranking_target=args.bo_ranking_target)
 
@@ -1272,7 +1272,7 @@ def _run_loco(args):
               f"hit_rate={hit_rate*100:.0f}% (baseline={baseline_hit*100:.0f}%)  "
               f"pool={len(pool_idx)}  selected={len(local_selected)}")
 
-    # ── Summary ──────────────────────────────────────────────────────────────
+    # -- Summary ---
     print("\n" + "=" * 70)
     print("  LOCO SUMMARY")
     print("=" * 70)
@@ -1364,7 +1364,7 @@ def _run_loco_evaluate(args):
     loco_results_by_seed = []   # list[dict[cid -> per-cluster results]]
 
     for i_seed, seed in enumerate(seeds):
-        print(f"\n── Seed {seed} ──")
+        print(f"\n-- Seed {seed} --")
         seed_results = {}
 
         for cid in range(n_clusters):
@@ -1427,7 +1427,7 @@ def _run_loco_evaluate(args):
 
         loco_results_by_seed.append(seed_results)
 
-    # ── Aggregate across seeds ──────────────────────────────────────────────
+    # -- Aggregate across seeds ---
     print("\n" + "=" * 70)
     print(f"  LOCO EVALUATION SUMMARY (mean ± std across "
           f"{len(seeds)} seeds)  hit threshold = score >= "
@@ -1489,7 +1489,7 @@ def _run_loco_evaluate(args):
           f"{_fmt(agg_hits, scale=100, prec=1)}%  "
           f"{np.mean([b for b in agg_base if not np.isnan(b)])*100:>6.1f}%")
 
-    # ── Plots ───────────────────────────────────────────────────────────────
+    # -- Plots ---
     label = f"{args.bo_acquisition}_{args.bo_surrogate}"
     for metric in ["AF", "EF"]:
         plot_loco_bar_multiseed(
@@ -1578,7 +1578,7 @@ def _run_learning_curve(args):
               f"Hit={result['hit_mean']*100:.1f}±{result['hit_std']*100:.1f}% "
               f"(base={baseline_hit*100:.1f}%)")
 
-    # ── Summary table ──────────────────────────────────────────────────────
+    # -- Summary table ---
     print("\n" + "=" * 70)
     print("  LEARNING CURVE SUMMARY")
     print("=" * 70)
@@ -1593,7 +1593,7 @@ def _run_learning_curve(args):
               f"{r['hit_mean']*100:>5.1f}±{r['hit_std']*100:<4.1f}%  "
               f"{r['baseline_hit']*100:>5.1f}%")
 
-    # Find the knee — smallest fraction where hit rate > 1.5× baseline
+    # Find the knee - smallest fraction where hit rate > 1.5× baseline
     for r in lc_results:
         if r["hit_mean"] > 1.5 * r["baseline_hit"]:
             print(f"\n  → Recommendation: ~{r['n_init_mean']:.0f} initial experiments "
@@ -1619,7 +1619,7 @@ def _run_recommend(args):
       7. Saves updated BO state
 
     Chemistry-targeted workflow (recommended)
-    -----------------------------------------
+    ---
     Provide your target linker, precursor, and/or modulator SMILES.
     The NeighborhoodTemplateSelector finds the most similar past experiments
     (by Morgan FP + chemistry-feature cosine similarity) and uses the nearest
@@ -1721,7 +1721,7 @@ def _run_recommend(args):
             "quality": _sig_quality,
         }
 
-    # Warn if thompson is used with an XGB surrogate — it degrades to
+    # Warn if thompson is used with an XGB surrogate - it degrades to
     # deterministic predict() because XGB has no tree estimators_ attribute.
     if args.bo_acquisition == "thompson" and args.bo_surrogate.startswith("xgb"):
         print("  WARNING: thompson sampling requires a RandomForest surrogate. "
@@ -1760,7 +1760,7 @@ def _run_recommend(args):
             _hash_mismatch = True
             print(f"[catalog] WARNING: DATA_CKPT layout hash mismatch "
                   f"({_stored_layout_hash} vs computed {_expected}). Cache "
-                  f"inconsistent — chemistry/process split may be wrong.")
+                  f"inconsistent - chemistry/process split may be wrong.")
 
     if _layout_stale or _stored_layout_hash is None:
         from feature_assembly import _INTERACTION_NAMES
@@ -1769,7 +1769,7 @@ def _run_recommend(args):
         n_tail = n_proc + n_int
         if n_tail >= n_feat:
             n_tail = 0   # guard against degenerate tiny matrices
-        print(f"[catalog] DATA_CKPT missing/stale/unhashed — using positional "
+        print(f"[catalog] DATA_CKPT missing/stale/unhashed - using positional "
               f"fallback (n_chem={n_feat - n_tail}, n_process_tail={n_tail}). "
               f"Run `python main.py` once to cache the full catalog.")
         X_groups = (["Chemistry"] * (n_feat - n_tail)
@@ -1780,7 +1780,7 @@ def _run_recommend(args):
                  + list(_INTERACTION_NAMES)
         meta["layout"]["ok"] = False
         meta["layout"]["warning"] = (
-            "Feature catalog missing or stale — chemistry/process split was "
+            "Feature catalog missing or stale - chemistry/process split was "
             "inferred from column positions. Chemistry-neighbor similarity "
             "may be inaccurate. Fix: run `python main.py` once to refresh "
             "checkpoints/data.pkl."
@@ -1819,7 +1819,7 @@ def _run_recommend(args):
         total_volume_ml=TOTAL_VOLUME_ML,
     )
 
-    # ── Chemistry template + trust region logic ───────────────────────────────
+    # -- Chemistry template + trust region logic ---
     # Chemistry template: find the nearest-neighbor row in the dataset whenever
     # any SMILES input is provided (linker, precursor, or modulator).  This
     # fixes the molecular features of the candidate matrix to the user's target
@@ -1831,7 +1831,7 @@ def _run_recommend(args):
                            args.bo_linker    is not None)
     trust_region = None
     override_bounds = None
-    ref_idx = None   # chemistry template — nearest neighbor in dataset
+    ref_idx = None   # chemistry template - nearest neighbor in dataset
     fixed_ratio = None  # stoichiometric metal/linker ratio from phosphine counts
 
     # Acquisition-scope defaults (global). Overridden below in fixed-chemistry
@@ -1876,11 +1876,11 @@ def _run_recommend(args):
             target_modulator_smiles=modulator_str,
         )
 
-        # ── Scope acquisition to the chemistry neighborhood ───────────────────
+        # -- Scope acquisition to the chemistry neighborhood ---
         # When both precursor + linker are provided, the user is asking
         # "maximize crystallinity for THIS chemistry". A global f_best / LFBO
         # tau means the acquisition compares against the best pxrd score
-        # anywhere in the dataset — often unattainable for the target family,
+        # anywhere in the dataset - often unattainable for the target family,
         # which collapses EI toward zero and makes LFBO labels come from
         # unrelated chemistries. Restrict the acquisition's reference pool to
         # the selected neighborhood so EI and LFBO calibrate against what's
@@ -1909,7 +1909,7 @@ def _run_recommend(args):
             else:
                 acq_scope_note = (f"global (neighborhood too small: "
                                   f"n={len(_nb_positions)})")
-                print(f"  [Acquisition] Using global scope — neighborhood "
+                print(f"  [Acquisition] Using global scope - neighborhood "
                       f"has only {len(_nb_positions)} rows "
                       f"(need >= {_MIN_NB_FOR_SCOPED_ACQ}).")
                 meta["acq_scope"] = {
@@ -1919,7 +1919,7 @@ def _run_recommend(args):
                     "reason": "neighborhood_too_small",
                 }
 
-        # ── Trust region (only when both precursor + linker are given) ────────
+        # -- Trust region (only when both precursor + linker are given) ---
         # Solvent restriction: when the recenter gate fires on exact-chem
         # successes, restrict the candidate pool to solvents those successes
         # used. Prevents the BO from sampling chemically unrelated solvents
@@ -1933,7 +1933,7 @@ def _run_recommend(args):
                 print(f"  [TrustRegion] Restored | length={trust_region.length:.3f}")
 
                 # Recenter on the best experiment within the chemistry
-                # neighborhood — not the global best, which may belong to a
+                # neighborhood - not the global best, which may belong to a
                 # completely different molecule and pull the TR to irrelevant
                 # process conditions.
                 #
@@ -2010,7 +2010,7 @@ def _run_recommend(args):
                               f"experiment (idx={best_idx}, score={y_raw[best_idx]:.0f}).")
                 else:
                     best_idx = int(np.argmax(y_raw))
-                    print(f"  [TrustRegion] No neighbors found — recentered on global "
+                    print(f"  [TrustRegion] No neighbors found - recentered on global "
                           f"best (idx={best_idx}, score={y_raw[best_idx]:.0f}).")
                 best_row = df_merged[mask].iloc[best_idx]
                 new_center = {}
@@ -2024,7 +2024,7 @@ def _run_recommend(args):
                 print(f"  [TrustRegion] Recentered on best observed experiment.")
 
             else:
-                # First iteration — use selector output to initialise trust region
+                # First iteration - use selector output to initialise trust region
                 if center is None:
                     print("  [TrustRegion] No similar neighbors found. "
                           "Using global search space.")
@@ -2065,11 +2065,11 @@ def _run_recommend(args):
                 for p, (lo, hi) in override_bounds.items():
                     print(f"    {p}: [{lo:.3g}, {hi:.3g}]")
 
-    # ── Chemistry template for featurizer ────────────────────────────────────
+    # -- Chemistry template for featurizer ---
     # When both target precursor AND linker SMILES are provided, re-featurize
     # the target chemistry from scratch through the full 12-block pipeline.
     # This makes the surrogate score the USER'S molecule rather than a
-    # nearest-neighbor proxy — required for novel-chemistry discovery.
+    # nearest-neighbor proxy - required for novel-chemistry discovery.
     #
     # Falls back to nearest-neighbor template if:
     #   - Only one of (precursor, linker) is provided (insufficient to re-featurize)
@@ -2105,7 +2105,7 @@ def _run_recommend(args):
                 if max_sim < 0.30:
                     _sim_level = "low"
                     print(f"  [ReFeaturize] WARNING: low similarity to training "
-                          f"({max_sim:.3f}). Surrogate is extrapolating — "
+                          f"({max_sim:.3f}). Surrogate is extrapolating - "
                           f"recommendations are informed guesses at best.")
                 elif max_sim < 0.60:
                     _sim_level = "medium"
@@ -2114,7 +2114,7 @@ def _run_recommend(args):
                 else:
                     _sim_level = "high"
                     print(f"  [ReFeaturize] Target close to training distribution "
-                          f"({max_sim:.3f}) — surrogate predictions should be reliable.")
+                          f"({max_sim:.3f}) - surrogate predictions should be reliable.")
 
                 meta["similarity"] = {"max_sim": float(max_sim),
                                        "level": _sim_level}
@@ -2141,7 +2141,7 @@ def _run_recommend(args):
             template_row = np.nanmedian(X_cv, axis=0)
             print("  [Template] Using dataset-median template (no chemistry SMILES provided).")
 
-    # ── Resolve fixed metal/linker ratio (when not a BO parameter) ──────────
+    # -- Resolve fixed metal/linker ratio (when not a BO parameter) ---
     # Fallback chain: explicit SMILES → ref row SMILES → ref row data → median
     if not args.bo_include_mlr and fixed_ratio is None:
         df_train = df_merged[mask]
@@ -2174,7 +2174,7 @@ def _run_recommend(args):
     # Restrict to allowed-solvent set when the recenter gate fired.
     #   strict     : both solvent_1 AND solvent_2 (if present) must be in the
     #                anchor set. Pure anchor solvents and pure-anchor binaries
-    #                only — preserves the original conservative behavior.
+    #                only - preserves the original conservative behavior.
     #   permissive : pure singles must use an anchor solvent; binary mixtures
     #                pass if at least one component is an anchor. Enables
     #                anchor + co-solvent exploration (e.g., DMF/DCM, DMF/THF
@@ -2262,7 +2262,7 @@ def _run_recommend(args):
         X_train_acq, y_train_acq, X_candidates, **acq_kwargs
     )
 
-    # ── Degenerate-acquisition fallback chain ──────────────────────────────────
+    # -- Degenerate-acquisition fallback chain ---
     # LFBO / LFBO-SSL output P(score >= tau) in [0, 1]. When the scoped
     # neighborhood's f_best comes from a solvent/chemistry class no longer in
     # the pool (e.g. solvent filter restricts to DMF but the highest-scoring
@@ -2330,7 +2330,7 @@ def _run_recommend(args):
                       f"(max={_chain[2]['max']:.4g}, range={_chain[2]['range']:.4g}).")
                 acq_vals = ei_vals
         else:
-            # Primary was lfbo or consensus — skip lfbo rung, go to EI
+            # Primary was lfbo or consensus - skip lfbo rung, go to EI
             ei_vals = EIAcquisition(xi=BO_EI_XI).score(mu, sigma, f_best_scoped)
             _chain.append(_summarize("ei", ei_vals))
             print(f"  [Acquisition] {_primary} degenerate "
@@ -2419,7 +2419,7 @@ def _run_recommend(args):
         if "phi_1" in results.columns:
             results.loc[results["phi_1"] == 1.0, "solvent_2"] = "NA"
     elif "phi_1" in results.columns:
-        # No solvent_2 column at all — all rows are single-solvent
+        # No solvent_2 column at all - all rows are single-solvent
         results["solvent_2"] = "NA"
         results["phi_1"] = 1.0
 
@@ -2459,7 +2459,7 @@ def _run_recommend(args):
     except Exception as e:
         print(f"  [Meta] Could not write sidecar: {type(e).__name__}: {e}")
 
-    print(f"\n── Iteration {iteration} — Top recommendations ──")
+    print(f"\n-- Iteration {iteration} - Top recommendations --")
     print(f"   (precursor_umol, linker_umol, modulator_umol are for {_display_vol_ml:.0f} mL of solvent)")
     top_cols = ["batch_rank",
                 "solvent_1", "solvent_2", "phi_1",
@@ -2540,7 +2540,7 @@ def run_bo_ablation(args):
 
     # Acquisitions that do not use regression surrogate mu/sigma for scoring.
     SURROGATE_AGNOSTIC = ["lfbo", "random"]
-    # Acquisitions that consume surrogate mu/sigma — cross with all surrogates.
+    # Acquisitions that consume surrogate mu/sigma - cross with all surrogates.
     # lfbo_ssl uses surrogate (mu, sigma) to pseudo-label the pool, so it is
     # surrogate-sensitive even though its scoring head is a classifier.
     SURROGATE_SENSITIVE = ["ei", "thompson", "consensus", "lfbo_ssl"]
@@ -2580,14 +2580,14 @@ def run_bo_ablation(args):
     all_labels = []
     all_summaries = []
 
-    # ── 1. Surrogate-agnostic acquisitions ────────────────────────────────────
-    print(f"\n── Surrogate-agnostic acquisitions (fixed surrogate: {args.bo_surrogate}) ──")
+    # -- 1. Surrogate-agnostic acquisitions ---
+    print(f"\n-- Surrogate-agnostic acquisitions (fixed surrogate: {args.bo_surrogate}) --")
 
     for acq in SURROGATE_AGNOSTIC:
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
         for seed in seeds:
             label = f"{acq}|seed={seed}"
-            print(f"\n── {label} ──")
+            print(f"\n-- {label} --")
             bo = BOLoop(
                 surrogate=surrogate,
                 acquisition_name=acq,
@@ -2607,8 +2607,8 @@ def run_bo_ablation(args):
                   f"HitDisc={summary['hit_discovery_rate']*100:.1f}%  "
                   f"Hit={summary['hit_rate']*100:.1f}%")
 
-    # ── 2. Surrogate-sensitive acquisitions ───────────────────────────────────
-    print(f"\n── Surrogate-sensitive acquisitions (EI / Thompson) ──")
+    # -- 2. Surrogate-sensitive acquisitions ---
+    print(f"\n-- Surrogate-sensitive acquisitions (EI / Thompson) --")
 
     # Track one history per surrogate (seed=42, ei) for calibration later
     calibration_histories = {}
@@ -2618,7 +2618,7 @@ def run_bo_ablation(args):
             surrogate = _resolve_surrogate(surr_name, ck_params)
             for seed in seeds:
                 label = f"{acq}|{surr_name}|seed={seed}"
-                print(f"\n── {label} ──")
+                print(f"\n-- {label} --")
                 bo = BOLoop(
                     surrogate=surrogate,
                     acquisition_name=acq,
@@ -2642,22 +2642,22 @@ def run_bo_ablation(args):
                 if acq == "ei" and seed == 42:
                     calibration_histories[surr_name] = history
 
-    # ── 3. Batch strategy comparison ──────────────────────────────────────────
+    # -- 3. Batch strategy comparison ---
     # Pick best acquisition by mean AF across seeds (from agnostic + sensitive)
-    print("\n── Batch strategy comparison ──")
+    print("\n-- Batch strategy comparison --")
     acq_af = {}
     for label, summary in all_summaries:
         acq_name = label.split("|")[0]
         if not np.isnan(summary["AF"]):
             acq_af.setdefault(acq_name, []).append(summary["AF"])
     if not acq_af:
-        print("  [skip] No non-NaN AF values — skipping batch comparison.")
+        print("  [skip] No non-NaN AF values - skipping batch comparison.")
         batch_strategies = []
         best_acq = None
     else:
         best_acq = max(acq_af, key=lambda a: np.mean(acq_af[a]))
         print(f"  Best acquisition by mean AF: {best_acq}")
-        # For batch, use args.bo_surrogate — only valid strategies for best_acq
+        # For batch, use args.bo_surrogate - only valid strategies for best_acq
         batch_strategies = VALID_BATCH_STRATEGIES.get(best_acq, ["diverse_greedy"])
     for strat in batch_strategies:
         surrogate = _resolve_surrogate(args.bo_surrogate, ck_params)
@@ -2677,7 +2677,7 @@ def run_bo_ablation(args):
         metrics = SimulationMetrics(y_raw)
         all_summaries.append((label, metrics.summary(history)))
 
-    # ── 4. Plots ──────────────────────────────────────────────────────────────
+    # -- 4. Plots ---
     # Split into agnostic / sensitive subsets for per-group raw plots
     agnostic_mask  = [l.split("|")[0] in SURROGATE_AGNOSTIC  for l in all_labels]
     sensitive_mask = [l.split("|")[0] in SURROGATE_SENSITIVE for l in all_labels]
@@ -2687,8 +2687,8 @@ def run_bo_ablation(args):
     h_sensitive = [h for h, m in zip(all_histories, sensitive_mask) if m]
     l_sensitive = [l for l, m in zip(all_labels,   sensitive_mask) if m]
 
-    # ── Primary comparison figures (seed-aggregated, readable) ────────────────
-    # 1. Mean ± std AF / EF / HitDisc% per method — the main summary chart
+    # -- Primary comparison figures (seed-aggregated, readable) ---
+    # 1. Mean ± std AF / EF / HitDisc% per method - the main summary chart
     plot_seed_aggregated_comparison(
         all_summaries,
         save_path="docs/bo_ablation_seed_aggregated.png",
@@ -2705,9 +2705,9 @@ def run_bo_ablation(args):
             metric="EF", save_path="docs/bo_ablation_heatmap_EF.png",
         )
     else:
-        print("  [skip] No surrogate-sensitive methods selected — skipping heatmaps.")
+        print("  [skip] No surrogate-sensitive methods selected - skipping heatmaps.")
 
-    # 3. Seed-averaged convergence bands — one shaded line per unique method
+    # 3. Seed-averaged convergence bands - one shaded line per unique method
     plot_seed_averaged_convergence(
         all_histories, all_labels, y_raw, metric="avg_score",
         save_path="docs/bo_ablation_convergence_bands.png",
@@ -2717,7 +2717,7 @@ def run_bo_ablation(args):
         save_path="docs/bo_ablation_regret_bands.png",
     )
 
-    # ── Per-group raw plots (all individual seed runs) ─────────────────────────
+    # -- Per-group raw plots (all individual seed runs) ---
     if h_agnostic:
         plot_topk_curves(h_agnostic, l_agnostic, y_raw,
                          save_path="docs/bo_ablation_topk_agnostic.png")
@@ -2725,16 +2725,16 @@ def run_bo_ablation(args):
         plot_topk_curves(h_sensitive, l_sensitive, y_raw,
                          save_path="docs/bo_ablation_topk_sensitive.png")
 
-    # ── Results CSV ───────────────────────────────────────────────────────────
+    # -- Results CSV ---
     results_df = save_simulation_results(all_histories, all_labels, y_raw,
                                          save_path="docs/bo_ablation_results.csv")
-    print(f"\n── Ablation complete. {len(all_summaries)} runs. ──")
+    print(f"\n-- Ablation complete. {len(all_summaries)} runs. --")
     print(results_df.to_string(index=False))
 
-    # ── 5. Surrogate calibration ───────────────────────────────────────────────
-    # Evaluate each surrogate using its seed=42 EI init split — EI is the most
+    # -- 5. Surrogate calibration ---
+    # Evaluate each surrogate using its seed=42 EI init split - EI is the most
     # relevant reference since it directly relies on sigma.
-    print("\n── Surrogate Calibration Summary ──")
+    print("\n-- Surrogate Calibration Summary --")
     for surr_name in surrogates:
         surrogate = _resolve_surrogate(surr_name, ck_params)
         ref_history = calibration_histories.get(surr_name)
@@ -2856,10 +2856,10 @@ if __name__ == "__main__":
                              "exact-chemistry recenter gate fires. "
                              "'permissive' (default): pure-single candidates must use "
                              "an anchor-success solvent, but binary mixtures pass if "
-                             "at least one component is an anchor solvent — allows "
+                             "at least one component is an anchor solvent - allows "
                              "co-solvent exploration (e.g., DMF/DCM if DMF anchored). "
                              "'strict': both components must be in the anchor set "
-                             "(conservative — pure anchor solvents and their pairwise "
+                             "(conservative - pure anchor solvents and their pairwise "
                              "mixtures only). "
                              "'off': no filter; all enumerated solvent pairs eligible.")
 

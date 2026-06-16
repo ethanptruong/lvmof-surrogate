@@ -2,8 +2,7 @@
 pipeline.py
 Optuna objective functions, progress callbacks, and eval_pipe.
 
-objective_xgb and objective_rf take X, y, cv, groups as explicit arguments
-(refactored away from the notebook's closure-based approach).
+objective_xgb and objective_rf take X, y, cv, groups as explicit arguments.
 """
 
 import numpy as np
@@ -15,9 +14,9 @@ from models import (scoring_ordinal, make_xgb_pipe, make_rf_pipe,
                     make_xgb_pipe_cl_only, make_rf_pipe_cl_only)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # objective_xgb
-# ─────────────────────────────────────────────────────────────
+# ---
 def objective_xgb(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":     trial.suggest_int("n_estimators", 100, 600),
@@ -59,9 +58,9 @@ def objective_xgb(trial, X, y, cv, groups, n_chem_features=None):
     return mean_qwk
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # objective_rf
-# ─────────────────────────────────────────────────────────────
+# ---
 def objective_rf(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
@@ -80,9 +79,9 @@ def objective_rf(trial, X, y, cv, groups, n_chem_features=None):
     return np.mean(scores)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # objective_xgb_cl_mi
-# ─────────────────────────────────────────────────────────────
+# ---
 def objective_xgb_cl_mi(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":     trial.suggest_int("n_estimators", 100, 600),
@@ -124,9 +123,9 @@ def objective_xgb_cl_mi(trial, X, y, cv, groups, n_chem_features=None):
     return mean_qwk
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # objective_rf_cl_mi
-# ─────────────────────────────────────────────────────────────
+# ---
 def objective_rf_cl_mi(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
@@ -144,9 +143,9 @@ def objective_rf_cl_mi(trial, X, y, cv, groups, n_chem_features=None):
     return np.mean(scores)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # objective_xgb_cl_only
-# ─────────────────────────────────────────────────────────────
+# ---
 def objective_xgb_cl_only(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":     trial.suggest_int("n_estimators", 100, 600),
@@ -195,9 +194,9 @@ def objective_xgb_cl_only(trial, X, y, cv, groups, n_chem_features=None):
     return mean_qwk
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # objective_rf_cl_only
-# ─────────────────────────────────────────────────────────────
+# ---
 def objective_rf_cl_only(trial, X, y, cv, groups, n_chem_features=None):
     param = {
         "n_estimators":      trial.suggest_int("n_estimators", 100, 600),
@@ -222,9 +221,9 @@ def objective_rf_cl_only(trial, X, y, cv, groups, n_chem_features=None):
     return np.mean(scores)
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # progress_callback
-# ─────────────────────────────────────────────────────────────
+# ---
 def progress_callback(study, trial):
     marker = " ◄ NEW BEST" if trial.value == study.best_value else ""
     print(f"  Trial {trial.number:3d} | QWK={trial.value:.4f} "
@@ -243,9 +242,9 @@ def progress_callback_cl_rf(study, trial):
           f"| Best={study.best_value:.4f}{marker}")
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # eval_pipe
-# ─────────────────────────────────────────────────────────────
+# ---
 def eval_pipe(name: str, pipe, X, y, cv, groups, scoring, n_jobs: int = 1):
     out = cross_validate(
         pipe, X, y, cv=cv, groups=groups,
@@ -272,9 +271,9 @@ def eval_pipe(name: str, pipe, X, y, cv, groups, scoring, n_jobs: int = 1):
     print(f"  Exact    {acc_m:.4f}  ±{acc_s:.4f}")
 
 
-# ─────────────────────────────────────────────────────────────
+# ---
 # suggest_rf_params / suggest_xgb_params
-# ─────────────────────────────────────────────────────────────
+# ---
 def suggest_rf_params(trial):
     return {
         "n_estimators": trial.suggest_int("n_estimators", 100, 600),
@@ -299,9 +298,9 @@ def suggest_xgb_params(trial):
     }
 
 
-# -----------------------------
+# ---
 # Objective factory
-# -----------------------------
+# ---
 def make_objective(model_type, with_cl=False):
     def objective(trial):
         if model_type == "rf":
@@ -335,9 +334,9 @@ def make_objective(model_type, with_cl=False):
     return objective
 
 
-# -----------------------------
+# ---
 # Optuna helpers
-# -----------------------------
+# ---
 def make_progress_callback(label):
     def progress_callback(study, trial):
         marker = "  ◄ NEW BEST" if trial.number == study.best_trial.number else ""

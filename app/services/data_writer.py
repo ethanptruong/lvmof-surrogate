@@ -25,7 +25,7 @@ import pandas as pd
 
 from app.services.status import CHECKPOINT_DIR, DATA_FILE, PROJECT_ROOT
 
-# ── Cross-process file lock (optional dep) ────────────────────────────────────
+# -- Cross-process file lock (optional dep) ---
 try:
     from filelock import FileLock, Timeout
     _LOCK_AVAILABLE = True
@@ -53,7 +53,7 @@ REQUIRED_COLS: tuple[str, ...] = (
 )
 
 
-# ── Public dataclasses ────────────────────────────────────────────────────────
+# -- Public dataclasses ---
 
 @dataclass
 class WriteResult:
@@ -91,7 +91,7 @@ class ConcurrentEditError(WriteError):
     """Raised when the Excel file changed mtime between read and write."""
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers ---
 
 def _ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
@@ -145,7 +145,7 @@ def next_experiment_id() -> str:
     return f"GUI-{n_gui + 1}"
 
 
-# ── Public write API ──────────────────────────────────────────────────────────
+# -- Public write API ---
 
 def append_row(row: dict[str, Any]) -> WriteResult:
     """Append a single experiment row, returning a ``WriteResult``.
@@ -163,7 +163,7 @@ def append_row(row: dict[str, Any]) -> WriteResult:
             raise WriteError(
                 "Another save is in progress. Wait a moment and try again."
             ) from exc
-    # No filelock installed — degrade gracefully (single-user mode).
+    # No filelock installed - degrade gracefully (single-user mode).
     return _do_append(row)
 
 
@@ -230,7 +230,7 @@ def _do_append(row: dict[str, Any]) -> WriteResult:
     )
 
 
-# ── Read / edit / delete API ──────────────────────────────────────────────────
+# -- Read / edit / delete API ---
 # The Manage-data page lets a chemist correct or remove an existing row.  Both
 # operations re-use the same safety machinery as ``append_row``: a cross-process
 # file lock, a timestamped backup before every write, and a concurrent-edit
@@ -272,7 +272,7 @@ def _check_row_identity(
     """
     if row_index < 0 or row_index >= len(df):
         raise WriteError(
-            f"Row {row_index} is out of range — the file has {len(df)} row(s). "
+            f"Row {row_index} is out of range - the file has {len(df)} row(s). "
             f"Refresh the page and try again."
         )
     actual_id = (
@@ -281,7 +281,7 @@ def _check_row_identity(
     )
     if expected_experiment_id is not None and str(actual_id) != str(expected_experiment_id):
         raise ConcurrentEditError(
-            "The data file changed since you loaded this page — the selected "
+            "The data file changed since you loaded this page - the selected "
             "row no longer matches. Refresh and try again so you don't edit "
             "the wrong experiment."
         )
@@ -421,7 +421,7 @@ def _do_update(
     )
 
 
-# ── Discarded-recommendation persistence ──────────────────────────────────────
+# -- Discarded-recommendation persistence ---
 # A small JSON sidecar file under ``checkpoints/`` records which BO picks the
 # chemist has explicitly dismissed.  Discarded picks are hidden from the
 # Record-result page even after a refresh / restart, but the underlying
@@ -477,7 +477,7 @@ def undiscard_recommendation(iteration: Any, rank: Any) -> None:
     _save_discarded(items)
 
 
-# ── Recommendation batch editing ──────────────────────────────────────────────
+# -- Recommendation batch editing ---
 
 def update_recommendation_batch(
     iteration: Any,
@@ -490,7 +490,7 @@ def update_recommendation_batch(
     data-editor are visible on the Record-result page (which reads its
     per-pick cards from the same joblib state).  Atomic via a temp file +
     ``os.replace`` so a crash mid-write can't leave a half-baked checkpoint.
-    No filelock here — the recommend state is only written by the BO loop
+    No filelock here - the recommend state is only written by the BO loop
     and the GUI, and the BO loop is single-threaded per process.
     """
     import joblib
@@ -525,14 +525,14 @@ def update_recommendation_batch(
     os.replace(tmp, RECOMMEND_STATE)
 
 
-# ── Pending recommendation lookup ─────────────────────────────────────────────
+# -- Pending recommendation lookup ---
 
 def pending_recommendations() -> list[dict]:
     """Return BO recommendations from ``recommend_state.pkl`` history that
     don't yet have a corresponding row in the experiment file.
 
     A recommendation is considered "recorded" once a chemist has saved a row
-    whose synthesis conditions match — but matching synthesis conditions
+    whose synthesis conditions match - but matching synthesis conditions
     against floating-point inputs is unreliable, so for v1 we simply return
     the latest batch and let the chemist pick by index.
     """
@@ -544,7 +544,7 @@ def pending_recommendations() -> list[dict]:
         iter_no = entry.get("iteration", "?")
         for rank, cand in enumerate(entry.get("top_candidates", []), start=1):
             out.append({
-                "label":     f"Iter {iter_no} — pick #{rank}",
+                "label":     f"Iter {iter_no} - pick #{rank}",
                 "iteration": iter_no,
                 "rank":      rank,
                 "candidate": cand,

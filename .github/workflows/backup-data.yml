@@ -1,6 +1,6 @@
 # Nightly off-site backup of the COMPASS persistent volume.
 #
-# Pulls /data (experiment Excel, checkpoints, docs — NOT the rebuildable
+# Pulls /data (experiment Excel, checkpoints, docs - NOT the rebuildable
 # HuggingFace cache) off the Fly machine and uploads a dated tarball to a
 # PRIVATE Cloudflare R2 bucket. This repo is public, so the backup must never
 # be stored as a workflow artifact or committed here.
@@ -23,7 +23,7 @@ name: Backup COMPASS data
 
 on:
   schedule:
-    - cron: "0 9 * * *" # 09:00 UTC = 1–2 AM Pacific, nightly
+    - cron: "0 9 * * *" # 09:00 UTC = 1-2 AM Pacific, nightly
   workflow_dispatch: {} # manual "Run workflow" button for testing
 
 jobs:

@@ -1,4 +1,4 @@
-"""Manage Data page — edit or remove existing experiment records.
+"""Manage Data page - edit or remove existing experiment records.
 
 Lets a chemist correct a mistyped value or delete a bad row without opening
 the Excel file by hand.  Both actions are guarded:
@@ -91,14 +91,14 @@ def _smart_cast(s: str) -> Any:
         return s
 
 
-# ── Flash message from a just-completed action ───────────────────────────────
+# -- Flash message from a just-completed action ---
 _flash = st.session_state.pop("mng_flash", None)
 if _flash:
     kind, msg = _flash
     getattr(st, kind, st.info)(msg)
 
 
-# ── Load the dataset ─────────────────────────────────────────────────────────
+# -- Load the dataset ---
 try:
     df = data_writer.read_experiment_df()
 except data_writer.WriteError as exc:
@@ -106,7 +106,7 @@ except data_writer.WriteError as exc:
     st.stop()
 
 if len(df) == 0:
-    st.info("The dataset is empty — there are no experiments to edit or remove.")
+    st.info("The dataset is empty - there are no experiments to edit or remove.")
     st.stop()
 
 st.caption(f"Dataset has **{len(df)}** experiment(s).")
@@ -119,10 +119,10 @@ with st.expander("Browse all experiments", expanded=False):
     st.caption("The left-most number is the row number used in the selector below.")
 
 
-# ── Row selector ─────────────────────────────────────────────────────────────
+# -- Row selector ---
 def _row_label(i: int) -> str:
     exp = df.iloc[i].get("experiment_id") if "experiment_id" in df.columns else None
-    return f"Row {i}" + (f" — {exp}" if exp not in (None, "") else "")
+    return f"Row {i}" + (f" - {exp}" if exp not in (None, "") else "")
 
 
 sel_idx = st.selectbox(
@@ -139,9 +139,9 @@ st.divider()
 tab_edit, tab_remove = st.tabs(["Edit entry", "Remove entry"])
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 # Tab 1: Edit
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 with tab_edit:
     editable = [c for c in EDITABLE_COLS if c in df.columns]
     if not editable:
@@ -185,7 +185,7 @@ with tab_edit:
         if not is_pending:
             if st.button("Save changes", type="primary", key="mng_edit_save"):
                 if not updates:
-                    st.info("No changes to save — every field is unchanged.")
+                    st.info("No changes to save - every field is unchanged.")
                 else:
                     st.session_state["mng_pending_edit"] = {
                         "sel_idx": sel_idx,
@@ -230,9 +230,9 @@ with tab_edit:
                 st.rerun()
 
 
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 # Tab 2: Remove
-# ───────────────────────────────────────────────────────────────────────────────
+# ---
 with tab_remove:
     st.caption("Removing an entry deletes the whole row from the dataset.")
 

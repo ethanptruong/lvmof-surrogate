@@ -78,12 +78,12 @@ def _stream_until_done(status: bo_runner.RunStatus, *, max_seconds: int = 6 * 60
     st.caption(f"Elapsed: {status.elapsed_seconds:.0f} s")
 
 
-# ── Primary action: update with the latest experiments ──────────────────────
+# -- Primary action: update with the latest experiments ---
 st.subheader("Update model with the latest experiments")
 st.caption(
     "Re-reads the experiment spreadsheet, re-fits the model with its current "
     "tuned settings, and regenerates every evaluation plot on this site. "
-    "Takes roughly 15–45 minutes; you can leave this page and come back."
+    "Takes roughly 15-45 minutes; you can leave this page and come back."
 )
 if st.button("Update model now", type="primary"):
     st.session_state["retrain_update"] = trainer.start_update()
@@ -97,12 +97,12 @@ if st.session_state.get("retrain_update") is not None:
 
 st.divider()
 
-# ── Advanced: the individual building blocks ─────────────────────────────────
-with st.expander("Advanced (individual steps — most users never need these)"):
+# -- Advanced: the individual building blocks ---
+with st.expander("Advanced (individual steps - most users never need these)"):
     st.markdown(
         "The update button above runs the first two steps together, which is "
         "almost always what you want. These are exposed separately for "
-        "debugging. **Note the trap:** “Re-fit” alone reuses the cached "
+        "debugging. **Note the trap:** 'Re-fit' alone reuses the cached "
         "features, so it will *not* see newly recorded experiments unless "
         "you re-featurize first."
     )
@@ -139,8 +139,8 @@ with st.expander("Advanced (individual steps — most users never need these)"):
     st.caption("Re-runs the full hyperparameter search (600 Optuna trials). "
                "**Takes many hours on this server and slows the site for "
                "everyone.** Prefer the automatic quarterly retrain, or "
-               "trigger it early from GitHub: Actions → “Quarterly "
-               "model retrain” → Run workflow — that runs on a "
+               "trigger it early from GitHub: Actions → 'Quarterly "
+               "model retrain' → Run workflow - that runs on a "
                "faster machine and leaves this site untouched.")
     if st.button("Full retune (hours)"):
         st.session_state["retrain_full"] = trainer.start_retune(skip_tuning=False)

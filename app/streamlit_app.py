@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import sys
 
-# ── Path bootstrap ───────────────────────────────────────────────────────────
+# -- Path bootstrap ---
 # Streamlit launches this file from any working directory, so push the
 # project root onto sys.path before importing anything that lives at the
 # repo root (config, main, data_processing, ...).
@@ -33,7 +33,7 @@ from app.services.status import (dataset_summary, iteration_history,
 from app.ui.components import (about_panel, metric_card, page_header,
                                 status_pill)  # noqa: E402
 
-# ── Page config ──────────────────────────────────────────────────────────────
+# -- Page config ---
 st.set_page_config(
     page_title="COMPASS",
     layout="wide",
@@ -41,7 +41,7 @@ st.set_page_config(
 )
 
 
-# ── Sidebar ──────────────────────────────────────────────────────────────────
+# -- Sidebar ---
 with st.sidebar:
     st.markdown("### COMPASS")
     st.caption("**C**losed-loop **O**ptimization of **M**OF **P**rocess "
@@ -63,7 +63,7 @@ with st.sidebar:
     if st.button("Refresh status", width="stretch"):
         st.rerun()
 
-# ── Landing page (also reachable via 1_Home) ─────────────────────────────────
+# -- Landing page (also reachable via 1_Home) ---
 page_header(
     "COMPASS",
     caption=("**C**losed-loop **O**ptimization of **M**OF **P**rocess "
@@ -77,7 +77,7 @@ dataset = dataset_summary()
 history = iteration_history()
 model   = model_status()
 
-# ── Stat cards row ────────────────────────────────────────────────────────────
+# -- Stat cards row ---
 c1, c2 = st.columns(2)
 with c1:
     metric_card(
@@ -96,7 +96,7 @@ with c2:
 
 st.write("")
 
-# ── Model status pill ────────────────────────────────────────────────────────
+# -- Model status pill ---
 if model.tuned:
     status_pill(
         f"Model tuned ({model.tuned_at:%Y-%m-%d})" if model.tuned_at
@@ -109,7 +109,7 @@ else:
 st.write("")
 st.divider()
 
-# ── Action buttons ───────────────────────────────────────────────────────────
+# -- Action buttons ---
 st.subheader("What would you like to do?")
 b1, b2 = st.columns(2)
 with b1:
